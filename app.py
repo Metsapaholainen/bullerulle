@@ -33,6 +33,8 @@ from scanner import (
     scan_signals_over_history,
     top_movers_by_timeframe,
 )
+from data.fundamentals_cache import get_earnings_dates, get_fundamentals_bulk
+from fundamentals_classifier import classify_lynch, days_to_earnings, LYNCH_CATEGORIES
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
 from pattern_diagrams import get_pattern_diagram
 from settings import Settings
@@ -140,10 +142,12 @@ with st.sidebar:
 
     st.divider()
     st.header("Presets")
+    builtin_names = presets.list_builtin_presets()
     existing = presets.list_presets()
-    chosen = st.selectbox("Load preset", ["(current)"] + existing)
+    preset_options = ["(current)"] + [f"⭐ {n}" for n in builtin_names] + existing
+    chosen = st.selectbox("Load preset", preset_options, help="⭐ presets are built-in, sourced directly from Qullamaggie's documented small/mid-cap vs large-cap thresholds.")
     if chosen != "(current)" and st.button("Apply selected preset"):
-        st.session_state.settings = presets.load_preset(chosen)
+        st.session_state.settings = presets._resolve_preset(chosen)
         st.rerun()
 
     new_name = st.text_input("Save current settings as")
@@ -161,9 +165,17 @@ history = st.session_state.history
 # context for reading any individual match, not tucked away in a submenu.
 md = st.session_state.get("market_direction")
 if md:
+    fast_line = ""
+    if md.get("fast_direction"):
+        fast_line = (
+            f"""<div style="font-size:0.85em; opacity:0.85; margin-top:2px;">"""
+            f"""{md['fast_emoji']} Short-term ({DEFAULT_BENCHMARK_SYMBOL} 10/20-day): """
+            f"""<b>{md['fast_direction']}</b> -- {md['fast_detail']}</div>"""
+        )
     st.markdown(
         f"""<div style="border:1px solid #444; border-radius:8px; padding:8px 14px; margin-bottom:10px;">
 <b>{md['emoji']} Market ({DEFAULT_BENCHMARK_SYMBOL}): {md['direction']}</b> -- {md['detail']}
+{fast_line}
 </div>""",
         unsafe_allow_html=True,
     )
@@ -381,6 +393,31 @@ with tab_designer:
                 s.min_volume_ratio = st.slider("Min volume ratio", 0.5, 10.0, float(s.min_volume_ratio), 0.1, key="d_ep_vol")
                 s.max_prior_range_pct = st.slider("Max prior base range %", 5.0, 60.0, float(s.max_prior_range_pct), 1.0, key="d_ep_range")
                 s.lookback_base_days = st.slider("Prior base lookback (days)", 5, 60, int(s.lookback_base_days), key="d_ep_lookback")
+                st.markdown("**Quiet-base check** (\"gone sideways for 3-6 months or more\")")
+                s.quiet_base_lookback_days = st.slider(
+                    "Quiet-base lookback (days)", 40, 200, int(s.quiet_base_lookback_days), 10, key="d_ep_quiet_lb"
+                )
+                s.max_quiet_base_run_pct = st.slider(
+                    "Max run in quiet-base window %", 10.0, 100.0, float(s.max_quiet_base_run_pct), 5.0, key="d_ep_quiet_run"
+                )
+                st.markdown("**Prior-EP avoidance** (soft penalty, not a hard exclude)")
+                s.prior_ep_lookback_days = st.slider(
+                    "Prior-EP lookback (days)", 60, 378, int(s.prior_ep_lookback_days), 10, key="d_ep_prior_lb"
+                )
+                s.prior_ep_min_gap_pct = st.slider(
+                    "Prior-EP min gap % (to count as \"already had one\")", 3.0, 30.0, float(s.prior_ep_min_gap_pct), 1.0,
+                    key="d_ep_prior_gap",
+                )
+                st.markdown("**Growth quality** (needs fundamentals fetched -- see Scanner tab)")
+                s.min_growth_pct_floor = st.slider(
+                    "Growth floor %", 0.0, 100.0, float(s.min_growth_pct_floor), 5.0, key="d_ep_growth_floor"
+                )
+                s.ideal_growth_pct = st.slider(
+                    "Ideal (\"5-star\") growth %", 25.0, 300.0, float(s.ideal_growth_pct), 25.0, key="d_ep_growth_ideal"
+                )
+                s.require_growth_floor = st.checkbox(
+                    "Require growth floor as a hard filter", value=s.require_growth_floor, key="d_ep_require_growth"
+                )
             elif setup_choice == "parabolic_short":
                 s.min_extension_adr_multiple = st.slider("Min extension (x ADR)", 0.5, 10.0, float(s.min_extension_adr_multiple), 0.1, key="d_ps_ext")
                 s.min_run_up_pct = st.slider("Min run-up %", 10.0, 300.0, float(s.min_run_up_pct), 5.0, key="d_ps_runup")
@@ -450,6 +487,25 @@ with tab_designer:
             )
             bt.trail_ema_period = st.slider("Trailing MA period", 5, 50, int(bt.trail_ema_period), key="d_bt_trail")
             bt.max_positions = st.slider("Max concurrent positions", 1, 30, int(bt.max_positions), key="d_bt_maxpos")
+            bt.max_position_pct_of_avg_volume = st.slider(
+                "Max position size (% of avg daily volume, 0 = off)", 0.0, 10.0,
+                float(bt.max_position_pct_of_avg_volume), 0.5, key="d_bt_liq_cap",
+                help="\"Buy no more than 1% of the average volume\" (Qullamaggie's Laws of Swing).",
+            )
+            if setup_choice == "episodic_pivot":
+                ep_override_options = ["(use Stop placement above)", "low_of_signal_day", "adr_multiple"]
+                ep_override_index = (
+                    ep_override_options.index(bt.ep_stop_mode_override)
+                    if bt.ep_stop_mode_override in ep_override_options
+                    else 0
+                )
+                ep_override_choice = st.selectbox(
+                    "EP stop override", ep_override_options, index=ep_override_index, key="d_bt_ep_override",
+                    help="EP's stop should exclude the gap (\"calculate stop from the low of the opening candle, "
+                    "don't include the gap\") -- the whole-day low used elsewhere is gap-contaminated for EP "
+                    "specifically. Only affects Episodic Pivot backtests.",
+                )
+                bt.ep_stop_mode_override = None if ep_override_choice == "(use Stop placement above)" else ep_override_choice
 
         with col_results:
             live_results = run_scan(settings, history, as_of=str(as_of), setup_names=[setup_choice])
@@ -459,7 +515,7 @@ with tab_designer:
 
             st.markdown("**Live backtest (full loaded history)**")
             signals = scan_signals_over_history(settings, history, setup_choice)
-            result = run_backtest(settings.backtest, signals, side=spec["side"])
+            result = run_backtest(settings.backtest, signals, side=spec["side"], setup_name=setup_choice)
             stats = compute_stats(result)
             if stats["trade_count"] == 0:
                 st.warning(stats_summary_text(stats))
@@ -591,6 +647,21 @@ with tab_scanner:
                 key="scanner_auto_detect",
             )
 
+        col_earn, col_earn_days = st.columns([2, 1])
+        with col_earn:
+            avoid_earnings = st.checkbox(
+                "📅 Avoid signals within N days of earnings",
+                value=True,
+                help="\"Avoid buying 3-days before earnings\" (Qullamaggie's Laws of Swing) -- fetches next "
+                "earnings dates in one bulk call (cheap regardless of universe size) and drops any match "
+                "whose symbol reports within the window below.",
+                key="scanner_avoid_earnings",
+            )
+        with col_earn_days:
+            avoid_earnings_days = st.number_input(
+                "Days", min_value=0, max_value=14, value=3, key="scanner_avoid_earnings_days", disabled=not avoid_earnings
+            )
+
         if st.button("Run Scan"):
             scan_history = history
             if prefilter_momentum:
@@ -599,7 +670,19 @@ with tab_scanner:
                 )
                 scan_history = {s: history[s] for s in shortlist if s in history}
                 st.session_state.scan_shortlist_size = len(scan_history)
-            st.session_state.last_scan = run_scan(settings, scan_history, as_of=str(as_of), auto_detect=auto_detect)
+
+            scan_earnings_dates = None
+            if avoid_earnings:
+                try:
+                    scan_earnings_dates = get_earnings_dates(get_client(), list(scan_history.keys()), as_of=str(as_of))
+                except Exception as exc:
+                    st.warning(f"Earnings-date lookup failed ({exc}) -- running without the earnings-avoidance filter.")
+
+            st.session_state.last_scan = run_scan(
+                settings, scan_history, as_of=str(as_of), auto_detect=auto_detect,
+                earnings_dates=scan_earnings_dates, avoid_earnings_window=avoid_earnings,
+                avoid_earnings_days=int(avoid_earnings_days),
+            )
         if prefilter_momentum and st.session_state.get("scan_shortlist_size") is not None:
             st.caption(f"Scanned {st.session_state.scan_shortlist_size} momentum-leading symbol(s), not the full universe.")
         results = st.session_state.last_scan
@@ -802,6 +885,90 @@ with tab_scanner:
                 for name, reason in SKIPPED_SCANS.items():
                     st.markdown(f"- **{name}**: {reason}")
 
+        with st.expander("📊 Fundamentals (growth, float, earnings date, Lynch tag)", expanded=False):
+            st.caption(
+                "Revenue/EPS growth, float shares, insider buy/sell ratio, next earnings date, and a Peter "
+                "Lynch-style category tag -- fetched from FMP on demand. Kept separate from 'Load / Refresh "
+                "Data' so the main scan stays fast and cheap on API calls; this only fetches for a small "
+                "shortlist you choose below."
+            )
+            fund_scope = st.radio(
+                "Symbols to fetch",
+                ["Last scan matches", "Momentum leaders", "Custom list"],
+                horizontal=True,
+                key="fund_scope",
+            )
+            fund_custom = ""
+            if fund_scope == "Custom list":
+                fund_custom = st.text_input("Symbols (comma-separated)", key="fund_custom_symbols")
+
+            if st.button("Fetch fundamentals", key="fund_fetch_btn"):
+                if fund_scope == "Last scan matches":
+                    fund_symbols = results["symbol"].unique().tolist() if not results.empty else []
+                elif fund_scope == "Momentum leaders":
+                    fund_symbols = momentum_shortlist(
+                        history, settings.universe.momentum_timeframes_days, settings.universe.momentum_top_pct
+                    )
+                else:
+                    fund_symbols = [s.strip().upper() for s in fund_custom.split(",") if s.strip()]
+                fund_symbols = [s for s in fund_symbols if s in history]
+
+                if not fund_symbols:
+                    st.warning("No symbols to fetch -- pick a scope with matches, or type some symbols.")
+                else:
+                    try:
+                        client = get_client()
+                        progress = st.progress(0.0, text="Fetching fundamentals...")
+                        fund_data = get_fundamentals_bulk(
+                            client, fund_symbols,
+                            on_progress=lambda i, n, s: progress.progress(i / n, text=f"{s} ({i}/{n})"),
+                        )
+                        fund_earnings = get_earnings_dates(client, fund_symbols, as_of=str(as_of))
+                        progress.empty()
+                        fund_rows = []
+                        for sym in fund_symbols:
+                            fd = fund_data.get(sym, {})
+                            fund_rows.append({
+                                "symbol": sym,
+                                "revenue_growth_pct": fd.get("revenue_growth_pct"),
+                                "eps_growth_pct": fd.get("eps_growth_pct"),
+                                "float_shares": fd.get("float_shares"),
+                                "free_float_pct": fd.get("free_float_pct"),
+                                "insider_acq_disp_ratio": fd.get("insider_acquired_disposed_ratio"),
+                                "next_earnings_date": fund_earnings.get(sym),
+                                "days_to_earnings": days_to_earnings(sym, fund_earnings, str(as_of)),
+                                "lynch_category": LYNCH_CATEGORIES[classify_lynch(fd)],
+                            })
+                        st.session_state.fundamentals_df = pd.DataFrame(fund_rows)
+                    except Exception as exc:
+                        st.error(f"Fundamentals fetch failed: {exc}")
+
+            fdf = st.session_state.get("fundamentals_df")
+            if fdf is None or fdf.empty:
+                st.info("Pick a scope above and click 'Fetch fundamentals'.")
+            else:
+                st.dataframe(fdf, use_container_width=True, height=300)
+                fund_pick = st.selectbox("Chart one", fdf["symbol"].tolist(), key="fund_chart_pick")
+                if fund_pick in history:
+                    st.plotly_chart(plot_symbol(history[fund_pick], fund_pick), use_container_width=True, key="fund_chart")
+
+            with st.expander("What do these columns mean?"):
+                st.markdown(
+                    "- **revenue_growth_pct / eps_growth_pct**: latest quarter's YoY growth. Qullamaggie's own "
+                    "bar for an Episodic Pivot: \"triple digit is ideal, mid/high double digits works really well too.\"\n"
+                    "- **float_shares / free_float_pct**: shares actually available to trade -- a smaller float "
+                    "moves faster on the same dollar volume.\n"
+                    "- **insider_acq_disp_ratio**: last quarter's insider shares acquired ÷ disposed -- above 1 "
+                    "means insiders bought more than they sold.\n"
+                    "- **days_to_earnings**: days until the next reported earnings date. \"Avoid buying 3-days "
+                    "before earnings\" (Qullamaggie's Laws of Swing) -- also enforced directly in the main scan "
+                    "via the checkbox above 'Run Scan'.\n"
+                    "- **lynch_category**: a best-effort Peter Lynch-style tag from growth rate alone (Fast "
+                    "Grower 25%+, Stalwart 8-25%, Slow Grower ~flat, Turnaround/Cyclical for negative growth) -- "
+                    "simplified, since true cyclical/turnaround/asset-play calls need sector and balance-sheet "
+                    "context this app doesn't fetch."
+                )
+
 
 # --------------------------------------------------------------------------
 # Tab: Backtest & Optimizer
@@ -827,7 +994,7 @@ with tab_backtest:
         )
         if st.button("Run backtest"):
             signals = scan_signals_over_history(settings, bt_history, bt_setup)
-            result = run_backtest(settings.backtest, signals, side=SETUP_REGISTRY[bt_setup]["side"])
+            result = run_backtest(settings.backtest, signals, side=SETUP_REGISTRY[bt_setup]["side"], setup_name=bt_setup)
             st.session_state.bt_result = result
 
         result = st.session_state.get("bt_result")
@@ -902,7 +1069,7 @@ with tab_backtest:
             for i, name in enumerate(enabled):
                 spec = SETUP_REGISTRY[name]
                 signals = scan_signals_over_history(settings, bt_history, name)
-                result = run_backtest(settings.backtest, signals, side=spec["side"])
+                result = run_backtest(settings.backtest, signals, side=spec["side"], setup_name=name)
                 stats = compute_stats(result)
                 compare_rows.append({"pattern": spec["label"], "side": spec["side"], **stats})
                 compare_progress.progress((i + 1) / len(enabled), text=f"{spec['label']} done")
@@ -1132,7 +1299,7 @@ with tab_settings:
 
     st.divider()
     st.subheader("Compare presets")
-    all_presets = presets.list_presets()
+    all_presets = [f"⭐ {n}" for n in presets.list_builtin_presets()] + presets.list_presets()
     to_compare = st.multiselect("Presets to compare", all_presets)
     if to_compare:
         st.dataframe(presets.compare_presets(to_compare), use_container_width=True, height=500)

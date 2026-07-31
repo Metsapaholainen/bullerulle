@@ -9,7 +9,9 @@ from indicators import add_gap_pct, add_volume_stats
 from settings import EpisodicPivotSettings
 
 
-def scan(df: pd.DataFrame, settings: EpisodicPivotSettings, rs_rating: pd.Series = None) -> pd.DataFrame:
+def scan(
+    df: pd.DataFrame, settings: EpisodicPivotSettings, rs_rating: pd.Series = None, fundamentals: dict = None
+) -> pd.DataFrame:
     df = df.copy()
 
     if "gap_pct" not in df.columns:
@@ -30,10 +32,57 @@ def scan(df: pd.DataFrame, settings: EpisodicPivotSettings, rs_rating: pd.Series
     cond &= prior_range_pct <= settings.max_prior_range_pct
     cond &= df["close"] >= settings.min_price
 
+    # "Best EPs are on stocks that have gone sideways for 3-6 months or
+    # more" -- a longer, coarser quiet-window check than prior_range_pct's
+    # tight-basing check above (this one just rejects a stock that already
+    # ran hard in the months before the gap, tight base or not).
+    quiet_base_run_pct = (
+        df["close"].shift(1) / df["close"].shift(settings.quiet_base_lookback_days + 1) - 1.0
+    ) * 100.0
+    cond &= quiet_base_run_pct.abs() <= settings.max_quiet_base_run_pct
+
+    # "Avoid stocks that have already made a big move from a previous EP" --
+    # a prior gap of similar size within the trailing window is a soft
+    # penalty (halved score below), not a hard exclude, since the article
+    # says "avoid," not "never."
+    prior_gap_flag = df["gap_pct"] >= settings.prior_ep_min_gap_pct
+    had_prior_ep = (
+        prior_gap_flag.shift(1).rolling(settings.prior_ep_lookback_days).sum() > settings.max_prior_ep_count
+    ).fillna(False)
+
+    # Growth-quality scoring: opt-in via the `fundamentals` kwarg (a plain
+    # dict for this single symbol, not a time series -- this app's data
+    # model doesn't carry historical-as-of fundamentals, so this reflects
+    # "most recent known growth," documented as a simplification).
+    growth_pct = None
+    growth_tier = "unknown"
+    if fundamentals:
+        rev_g = fundamentals.get("revenue_growth_pct")
+        eps_g = fundamentals.get("eps_growth_pct")
+        candidates = [g for g in (rev_g, eps_g) if g is not None]
+        if candidates:
+            growth_pct = max(candidates)
+            if growth_pct >= settings.ideal_growth_pct:
+                growth_tier = "5-star"
+            elif growth_pct >= settings.min_growth_pct_floor:
+                growth_tier = "floor-met"
+            else:
+                growth_tier = "below-floor"
+    if settings.require_growth_floor and growth_pct is not None:
+        cond &= growth_pct >= settings.min_growth_pct_floor
+
+    growth_bonus = 2.0 if growth_tier == "5-star" else (1.0 if growth_tier == "floor-met" else 0.0)
+    base_score = df["gap_pct"].clip(lower=0) / 10.0 + df[vol_ratio_col].clip(lower=0) + growth_bonus
+    score = base_score.where(~had_prior_ep, base_score / 2.0)
+
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
     out["gap_pct"] = df["gap_pct"]
     out["volume_ratio"] = df[vol_ratio_col]
     out["prior_range_pct"] = prior_range_pct
-    out["score"] = df["gap_pct"].clip(lower=0) / 10.0 + df[vol_ratio_col].clip(lower=0)
+    out["quiet_base_run_pct"] = quiet_base_run_pct
+    out["had_prior_ep"] = had_prior_ep
+    out["growth_pct"] = growth_pct
+    out["growth_tier"] = growth_tier
+    out["score"] = score
     return out

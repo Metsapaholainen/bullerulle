@@ -21,11 +21,34 @@ ENDPOINTS = {
     "company_screener": "/company-screener",
     "historical_price_eod_full": "/historical-price-eod/full",
     "quote": "/quote",
+    "income_statement_growth": "/income-statement-growth",
+    "shares_float": "/shares-float",
+    "earnings_calendar": "/earnings-calendar",
+    "insider_trade_statistics": "/insider-trading/statistics",
 }
 
 
 class FMPError(RuntimeError):
     pass
+
+
+def _resolve_api_key(explicit: Optional[str]) -> Optional[str]:
+    """Explicit arg > Streamlit Cloud secrets > local .env/os.environ.
+
+    The `st.secrets` check is wrapped defensively: importing streamlit is
+    always safe (it's a hard dependency of this project), but *reading*
+    `st.secrets` raises if no secrets.toml exists (the normal case for local
+    dev), so any exception there just falls through to the .env path."""
+    if explicit:
+        return explicit
+    try:
+        import streamlit as st
+
+        if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
+            return st.secrets["FMP_API_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("FMP_API_KEY")
 
 
 class FMPClient:
@@ -35,7 +58,7 @@ class FMPClient:
         max_retries: int = 3,
         backoff_seconds: float = 1.5,
     ):
-        self.api_key = api_key or os.environ.get("FMP_API_KEY")
+        self.api_key = _resolve_api_key(api_key)
         if not self.api_key:
             raise FMPError(
                 "No FMP API key found. Set FMP_API_KEY in your environment or .env file "
@@ -94,3 +117,33 @@ class FMPClient:
             return []
         data = self._get(ENDPOINTS["quote"], params={"symbol": ",".join(symbols)})
         return data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+
+    def income_statement_growth(self, symbol: str, period: str = "quarter", limit: int = 1) -> list:
+        """Wraps /income-statement-growth -- fields of interest are
+        `growthRevenue`/`growthEPS` (decimal fractions, e.g. 0.11 = 11%)."""
+        data = self._get(
+            ENDPOINTS["income_statement_growth"], params={"symbol": symbol, "period": period, "limit": limit}
+        )
+        return data if isinstance(data, list) else []
+
+    def shares_float(self, symbol: str) -> dict:
+        """Wraps /shares-float -- `floatShares`/`freeFloat`/`outstandingShares`."""
+        data = self._get(ENDPOINTS["shares_float"], params={"symbol": symbol})
+        if isinstance(data, list) and data:
+            return data[0]
+        return data if isinstance(data, dict) else {}
+
+    def earnings_calendar(self, from_date: str, to_date: str) -> list:
+        """Wraps /earnings-calendar -- ONE shared date-range call across every
+        US-listed ticker (no symbol filter exists on this endpoint), so
+        callers must filter the result to their own symbol set themselves.
+        Keep `from_date`/`to_date` narrow -- even a ~6-week window returns
+        hundreds of KB across the whole market."""
+        data = self._get(ENDPOINTS["earnings_calendar"], params={"from": from_date, "to": to_date})
+        return data if isinstance(data, list) else []
+
+    def insider_trade_statistics(self, symbol: str) -> list:
+        """Wraps /insider-trade-statistics -- best-effort/optional; some FMP
+        plan tiers may not include this, so callers should tolerate FMPError."""
+        data = self._get(ENDPOINTS["insider_trade_statistics"], params={"symbol": symbol})
+        return data if isinstance(data, list) else []

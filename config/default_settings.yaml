@@ -45,6 +45,14 @@ episodic_pivot:
   lookback_base_days: 20            # stock should have been basing/quiet before the gap
   max_prior_range_pct: 20.0         # tightness of that prior base
   min_price: 1.0
+  quiet_base_lookback_days: 100     # "gone sideways for 3-6 months or more"
+  max_quiet_base_run_pct: 40.0
+  prior_ep_lookback_days: 252       # avoid stacking on a recent prior EP (soft penalty)
+  prior_ep_min_gap_pct: 8.0
+  max_prior_ep_count: 0
+  min_growth_pct_floor: 25.0        # "mid/high double digits works really well too"
+  ideal_growth_pct: 100.0           # "triple digit ... ideal"
+  require_growth_floor: false
 
 parabolic_short:
   enabled: true
@@ -125,3 +133,5 @@ backtest:
   max_position_pct_of_equity: 20.0  # "don't put more than 20% of your account into any one share"
   avoid_chase_adr_multiple: 1.5     # skip entry if the signal day's range > this many ADRs (0 = disabled)
   entry_delay_days: 1               # enter next bar's open after the signal
+  max_position_pct_of_avg_volume: 1.0  # "buy no more than 1% of the average volume" (0 = disabled)
+  ep_stop_mode_override: null       # e.g. "adr_multiple" to override stop_mode for EP backtests only

@@ -70,6 +70,22 @@ class EpisodicPivotSettings:
     lookback_base_days: int = 20
     max_prior_range_pct: float = 20.0
     min_price: float = 1.0
+    # "Best EPs are on stocks that have gone sideways for 3-6 months or
+    # more" -- a separate, longer window from lookback_base_days' tightness
+    # check above, which only looks at the tail end right before the gap.
+    quiet_base_lookback_days: int = 100
+    max_quiet_base_run_pct: float = 40.0
+    # "Avoid stocks that have already made a big move from a previous EP" --
+    # a soft penalty (halves score), not a hard exclude, per the article.
+    prior_ep_lookback_days: int = 252
+    prior_ep_min_gap_pct: float = 8.0
+    max_prior_ep_count: int = 0
+    # Growth-quality scoring, opt-in via the `fundamentals` kwarg to scan().
+    # "Ideal EPS/revenue growth is triple digit YoY, but mid/high double
+    # digits works really well too."
+    min_growth_pct_floor: float = 25.0
+    ideal_growth_pct: float = 100.0
+    require_growth_floor: bool = False
 
 
 @dataclass
@@ -178,6 +194,16 @@ class BacktestSettings:
     # ATR, skip it"). Set to 0 to disable.
     avoid_chase_adr_multiple: float = 1.5
     entry_delay_days: int = 1
+    # "Buy no more than 1% of the average volume" (Qullamaggie's Laws of
+    # Swing) -- caps share count independent of the risk-based sizing
+    # above. 0 disables.
+    max_position_pct_of_avg_volume: float = 1.0
+    # Episodic Pivot's stop should exclude the gap ("calculate stop from
+    # the low of the opening candle, don't include the gap") -- the
+    # whole-day low used by stop_mode="low_of_signal_day" elsewhere is
+    # gap-contaminated for EP specifically. None = use `stop_mode` as-is;
+    # set to e.g. "adr_multiple" to override it for EP backtests only.
+    ep_stop_mode_override: Optional[str] = None
 
 
 @dataclass

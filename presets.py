@@ -11,6 +11,7 @@ import pandas as pd
 from settings import Settings, DEFAULT_SETTINGS_PATH
 
 PRESETS_DIR = Path(__file__).parent / "presets_store"
+BUILTIN_PRESETS_DIR = Path(__file__).parent / "config"
 
 
 def _preset_path(name: str) -> Path:
@@ -44,12 +45,34 @@ def load_default() -> Settings:
     return Settings.load(DEFAULT_SETTINGS_PATH)
 
 
+def list_builtin_presets() -> list:
+    """Built-in presets ship in config/ (unlike user presets in the
+    gitignored presets_store/), so they're always present after a fresh
+    clone/deploy. Named preset_<name>.yaml; returns just <name>."""
+    return sorted(
+        p.stem.replace("preset_", "", 1) for p in BUILTIN_PRESETS_DIR.glob("preset_*.yaml")
+    )
+
+
+def load_builtin_preset(name: str) -> Settings:
+    return Settings.load(BUILTIN_PRESETS_DIR / f"preset_{name}.yaml")
+
+
+def _resolve_preset(name: str) -> Settings:
+    """Accepts either a plain user-preset name or a built-in's display
+    name (the "⭐ " prefix app.py uses in its selectbox)."""
+    if name.startswith("⭐ "):
+        return load_builtin_preset(name[2:])
+    return load_preset(name)
+
+
 def compare_presets(names: list) -> pd.DataFrame:
     """Flatten each named preset's settings into one row for a side-by-side
-    comparison table (used by the Designer/Settings tabs)."""
+    comparison table (used by the Designer/Settings tabs). `names` may mix
+    user-preset names and "⭐ "-prefixed built-in names."""
     rows = []
     for name in names:
-        settings = load_preset(name)
+        settings = _resolve_preset(name)
         flat = {"preset": name}
         for section, section_obj in settings.to_dict().items():
             for field_name, value in section_obj.items():

@@ -3,5 +3,7 @@ __pycache__/
 *.pyc
 .env
 cache/*.parquet
+cache/fundamentals/
 presets_store/*.yaml
 scan_*.csv
+.streamlit/secrets.toml

@@ -23,13 +23,24 @@ from setups import SETUP_REGISTRY
 
 DEFAULT_BENCHMARK_SYMBOL = "SPY"
 
+# Setups whose scan() accepts a `fundamentals` kwarg for internal scoring
+# (currently just Episodic Pivot). Every other setup's results still get
+# fundamentals columns attached below -- this only controls which setups'
+# own match/score logic *uses* the data internally.
+FUNDAMENTALS_AWARE_SETUPS = {"episodic_pivot"}
+
 
 def history_lookback_days(settings: Settings) -> int:
     """Enough calendar days of history to satisfy every rolling window used
     across all setups plus the RS rating, with headroom."""
     candidates = [
         settings.breakout.max_consolidation_days + settings.breakout.prior_move_lookback_days + 30,
-        settings.episodic_pivot.lookback_base_days + 30,
+        max(
+            settings.episodic_pivot.lookback_base_days,
+            settings.episodic_pivot.quiet_base_lookback_days,
+            settings.episodic_pivot.prior_ep_lookback_days,
+        )
+        + 30,
         settings.parabolic_short.run_up_lookback_days + 30,
         settings.cup_with_handle.cup_lookback_days + settings.cup_with_handle.prior_uptrend_lookback_days + 30,
         settings.double_bottom.pattern_lookback_days + 30,
@@ -248,6 +259,26 @@ def market_direction(benchmark_df: pd.DataFrame) -> dict:
         direction, emoji = "Choppy / Mixed", "🟡"
         detail = "Mixed signals between the 50/200-day averages -- no clear trend either way; be more selective and size down."
 
+    # Faster secondary read: "we always use the 10/20 SMA as our guide" on
+    # whether to be aggressive or defensive (Qullamaggie, Nasdaq 90s-vs-today
+    # article) -- a quicker-reacting confirmation alongside the 50/200 read
+    # above, not a replacement for it.
+    sma10 = close.rolling(10).mean().iloc[-1]
+    sma20 = close.rolling(20).mean().iloc[-1]
+    fast_above10 = last > sma10
+    fast_above20 = last > sma20
+    fast_cross = sma10 > sma20
+
+    if fast_above10 and fast_above20 and fast_cross:
+        fast_direction, fast_emoji = "Aggressive", "🟢"
+        fast_detail = "Above both the 10- and 20-day average, with the 10 above the 20 -- short-term momentum favors being aggressive."
+    elif not fast_above10 and not fast_above20 and not fast_cross:
+        fast_direction, fast_emoji = "Defensive", "🔴"
+        fast_detail = "Below both the 10- and 20-day average, with the 10 below the 20 -- favor playing defense, even if the longer-term 50/200 read is fine."
+    else:
+        fast_direction, fast_emoji = "Neutral", "🟡"
+        fast_detail = "Mixed short-term signal between the 10/20-day averages."
+
     return {
         "direction": direction,
         "emoji": emoji,
@@ -255,6 +286,11 @@ def market_direction(benchmark_df: pd.DataFrame) -> dict:
         "close": float(last),
         "sma50": float(sma50),
         "sma200": float(sma200),
+        "sma10": float(sma10),
+        "sma20": float(sma20),
+        "fast_direction": fast_direction,
+        "fast_emoji": fast_emoji,
+        "fast_detail": fast_detail,
     }
 
 
@@ -315,6 +351,10 @@ def run_scan(
     as_of: Optional[str] = None,
     setup_names: Optional[list] = None,
     auto_detect: bool = False,
+    fundamentals: Optional[dict] = None,
+    earnings_dates: Optional[dict] = None,
+    avoid_earnings_window: bool = True,
+    avoid_earnings_days: int = 3,
 ) -> pd.DataFrame:
     """Given already-fetched history, run every enabled setup for the most
     recent (or `as_of`) date per symbol and return one ranked DataFrame.
@@ -322,7 +362,22 @@ def run_scan(
     With `auto_detect=True`, each setup is tried across several realistic
     pattern sizes (see PATTERN_SIZE_VARIANTS) instead of just the one
     exact size in `settings` -- a symbol counts as a match if *any* size
-    fits, and the best-scoring size's diagnostics are kept."""
+    fits, and the best-scoring size's diagnostics are kept.
+
+    `fundamentals` (optional {symbol: {revenue_growth_pct, eps_growth_pct,
+    float_shares, free_float_pct, insider_acquired_disposed_ratio}}) and
+    `earnings_dates` (optional {symbol: "YYYY-MM-DD" or None}) are both
+    fetched separately (data/fundamentals_cache.py, on demand for a
+    shortlist, not the whole universe) and passed in here. When present,
+    every result row -- regardless of which setup produced it -- gets
+    revenue_growth_pct/eps_growth_pct/days_to_earnings/lynch_category
+    columns attached (mirroring how rs_rating is already universal below).
+    Only Episodic Pivot's own scan() additionally *uses* fundamentals for
+    internal scoring (see FUNDAMENTALS_AWARE_SETUPS). If
+    `avoid_earnings_window` is True and earnings_dates was supplied, rows
+    within `avoid_earnings_days` of an earnings date are dropped --
+    "avoid buying 3-days before earnings" (Qullamaggie's Laws of Swing),
+    applied across every setup, not just EP."""
     setup_names = setup_names or enabled_setup_names(settings)
     if not setup_names or not history:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
@@ -356,10 +411,14 @@ def run_scan(
                 else [getattr(settings, spec["settings_attr"])]
             )
 
+            scan_kwargs = {}
+            if setup_name in FUNDAMENTALS_AWARE_SETUPS and fundamentals is not None:
+                scan_kwargs["fundamentals"] = fundamentals.get(symbol, {})
+
             best_row = None
             best_variant_settings = None
             for variant_settings in variants:
-                result = spec["module"].scan(enriched, variant_settings, rs_rating=rs_series)
+                result = spec["module"].scan(enriched, variant_settings, rs_rating=rs_series, **scan_kwargs)
                 if eval_date not in result.index:
                     continue
                 candidate = result.loc[eval_date]
@@ -393,12 +452,42 @@ def run_scan(
     if not rows:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
 
+    result_df = pd.DataFrame(rows)
+
+    # Universal fundamentals attachment -- every setup's results get these
+    # columns (not just Episodic Pivot's own internal scoring above),
+    # mirroring how rs_rating is already attached to every row regardless
+    # of whether that setup's match condition uses it.
+    if fundamentals:
+        from fundamentals_classifier import classify_lynch, days_to_earnings, LYNCH_CATEGORIES
+
+        result_df["revenue_growth_pct"] = result_df["symbol"].map(
+            lambda s: fundamentals.get(s, {}).get("revenue_growth_pct")
+        )
+        result_df["eps_growth_pct"] = result_df["symbol"].map(
+            lambda s: fundamentals.get(s, {}).get("eps_growth_pct")
+        )
+        result_df["lynch_category"] = result_df["symbol"].map(
+            lambda s: LYNCH_CATEGORIES[classify_lynch(fundamentals.get(s, {}))]
+        )
+    if earnings_dates:
+        from fundamentals_classifier import days_to_earnings, filter_earnings_avoidance
+
+        result_df["days_to_earnings"] = result_df.apply(
+            lambda r: days_to_earnings(r["symbol"], earnings_dates, r["date"]), axis=1
+        )
+        if avoid_earnings_window:
+            result_df = filter_earnings_avoidance(result_df, earnings_dates, as_of_ts, avoid_earnings_days)
+
+    if result_df.empty:
+        return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
+
     # Prioritize high-momentum (high RS rating) leaders first -- O'Neil and
     # Qullamaggie alike emphasize that these patterns matter most in market
     # leaders, not laggards that happen to technically match. Score is the
     # tie-breaker within the same RS tier.
     return (
-        pd.DataFrame(rows)
+        result_df
         .sort_values(["rs_rating", "score"], ascending=[False, False], na_position="last")
         .reset_index(drop=True)
     )

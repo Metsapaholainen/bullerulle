@@ -103,6 +103,8 @@ def _prepare_signal_frame(df: pd.DataFrame, trail_period: int, trail_ma_type: st
             d["adr_pct"] = d["adr_pct_20"]
         else:
             d["adr_pct"] = (d["high"] / d["low"] - 1.0).rolling(20).mean() * 100.0
+    if "vol_avg_50" not in d.columns:
+        d["vol_avg_50"] = d["volume"].rolling(50).mean()
     return d
 
 
@@ -127,10 +129,21 @@ def run_backtest(
     bt: BacktestSettings,
     signals: dict,
     side: str = "long",
+    setup_name: str = None,
 ) -> BacktestResult:
     """`signals`: {symbol: DataFrame} as produced by
     scanner.scan_signals_over_history -- must have a boolean `match` column
-    plus open/high/low/close/volume (and ideally adr_pct)."""
+    plus open/high/low/close/volume (and ideally adr_pct).
+
+    `setup_name`, if passed as "episodic_pivot", activates
+    `bt.ep_stop_mode_override` (if set) for these trades only -- EP's stop
+    should exclude the gap ("calculate stop from the low of the opening
+    candle"), which the whole-day-low `stop_mode="low_of_signal_day"`
+    doesn't do. Every other setup, and EP with no override configured,
+    behaves exactly as before."""
+    effective_stop_mode = (
+        bt.ep_stop_mode_override if (setup_name == "episodic_pivot" and bt.ep_stop_mode_override) else bt.stop_mode
+    )
     prepared = {
         sym: _prepare_signal_frame(df, bt.trail_ema_period, bt.trail_ma_type)
         for sym, df in signals.items()
@@ -265,7 +278,7 @@ def run_backtest(
             if adr_stop_distance <= 0:
                 continue
 
-            if bt.stop_mode == "low_of_signal_day":
+            if effective_stop_mode == "low_of_signal_day":
                 # Stop at the signal day's actual low (high for shorts),
                 # capped so it's never more than stop_adr_multiple ADRs away
                 # ("stop should be no more than the ATR").
@@ -292,6 +305,14 @@ def run_backtest(
             if bt.max_position_pct_of_equity > 0 and entry_price > 0:
                 max_shares_by_position_cap = (equity * bt.max_position_pct_of_equity / 100.0) / entry_price
                 shares = min(shares, max_shares_by_position_cap)
+            # "Buy no more than 1% of the average volume" -- caps share
+            # count against the signal day's own liquidity, independent of
+            # the equity-based caps above.
+            if bt.max_position_pct_of_avg_volume > 0:
+                avg_vol_at_signal = signal_bar.get("vol_avg_50")
+                if avg_vol_at_signal is not None and np.isfinite(avg_vol_at_signal) and avg_vol_at_signal > 0:
+                    max_shares_by_liquidity = avg_vol_at_signal * (bt.max_position_pct_of_avg_volume / 100.0)
+                    shares = min(shares, max_shares_by_liquidity)
             if shares <= 0:
                 continue
 
