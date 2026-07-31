@@ -1,0 +1,119 @@
+# Default Qullamaggie-style scanner/backtester settings.
+# Every value here is exposed as an adjustable control in the Streamlit app
+# and can be saved as a named preset (see presets.py).
+
+universe:
+  min_price: 1.0
+  min_market_cap: 300000000        # $300M -- lower bound of small-cap
+  max_market_cap: 10000000000      # $10B -- upper bound of mid-cap (0 = no cap)
+  min_avg_dollar_volume: 20000000  # 20-day avg $ volume, $20M -- "strongest liquidity" floor
+  exchanges: ["NASDAQ", "NYSE", "AMEX"]
+  exclude_etf: true
+  exclude_funds: true
+  max_symbols: 1500                # safety cap on universe size (API/compute budget)
+  momentum_timeframes_days: [21, 63, 126, 252, 378]  # ~1, 3, 6, 12, 18 months
+  momentum_top_pct: 2.0             # pre-filter to the top N% of movers in any timeframe
+
+rs_rating:
+  # IBD-style weighted multi-period return, percentile-ranked (1-99) across the universe.
+  lookback_periods: [63, 126, 189, 252]   # ~3, 6, 9, 12 months of trading days
+  period_weights: [0.4, 0.2, 0.2, 0.2]    # front-loaded like IBD's RS formula
+
+breakout:
+  enabled: true
+  min_adr_pct: 4.0                  # Average Daily Range % floor (20-day)
+  adr_lookback_days: 20
+  prior_move_lookback_days: 63      # ~3 months to look back for the base-building run
+  prior_move_min_pct: 30.0
+  prior_move_max_pct: 100.0
+  min_consolidation_days: 10        # ~2 weeks
+  max_consolidation_days: 40        # ~8 weeks
+  max_consolidation_range_pct: 25.0 # (max high - min low) / min low over the consolidation window
+  require_above_ema10: true
+  require_above_ema20: true
+  ema_fast_period: 10
+  ema_slow_period: 20
+  breakout_volume_ratio_min: 1.5    # breakout-day volume vs 50-day average volume
+  volume_avg_period: 50
+  min_rs_rating: 90
+
+episodic_pivot:
+  enabled: true
+  min_gap_pct: 10.0
+  min_volume_ratio: 2.0             # gap-day volume vs 50-day average volume
+  volume_avg_period: 50
+  lookback_base_days: 20            # stock should have been basing/quiet before the gap
+  max_prior_range_pct: 20.0         # tightness of that prior base
+  min_price: 1.0
+
+parabolic_short:
+  enabled: true
+  ema_period: 20
+  min_extension_adr_multiple: 3.0   # close vs EMA20, expressed in multiples of ADR
+  min_run_up_pct: 100.0
+  run_up_lookback_days: 20
+  consecutive_up_days_min: 3
+
+# --- William O'Neil chart-pattern setups (from "How to Make Money in Stocks") ---
+
+cup_with_handle:
+  enabled: true
+  cup_lookback_days: 130            # ~26 weeks, window searched for the cup
+  left_peak_days: 40                # portion of that window treated as "the left side high"
+  handle_lookback_days: 15          # ~3 weeks, most recent sub-window treated as the handle
+  min_cup_depth_pct: 12.0
+  max_cup_depth_pct: 35.0
+  max_handle_depth_pct: 15.0
+  min_recovery_pct: 85.0            # handle's peak must recover to at least this % of the left high
+  handle_upper_half_only: true      # handle's low must stay above the cup's midpoint
+  prior_uptrend_lookback_days: 60
+  min_prior_uptrend_pct: 30.0
+  breakout_volume_ratio_min: 1.4
+  volume_avg_period: 50
+
+double_bottom:
+  enabled: true
+  pattern_lookback_days: 50         # ~10 weeks: split into low1 / middle peak / low2 segments
+  min_depth_pct: 10.0
+  max_depth_pct: 40.0
+  max_low_difference_pct: 8.0       # how far the second low may differ from the first
+  breakout_volume_ratio_min: 1.4
+  volume_avg_period: 50
+
+flat_base:
+  enabled: true
+  base_days: 25                     # ~5 weeks, O'Neil's minimum flat-base length
+  max_range_pct: 15.0
+  prior_move_lookback_days: 40
+  min_prior_move_pct: 20.0
+  breakout_volume_ratio_min: 1.4
+  volume_avg_period: 50
+
+ascending_base:
+  enabled: true
+  pattern_lookback_days: 70         # ~14 weeks across 3 segments (a staircase of pullbacks)
+  min_segment_depth_pct: 5.0
+  max_segment_depth_pct: 25.0
+  breakout_volume_ratio_min: 1.4
+  volume_avg_period: 50
+
+high_tight_flag:
+  enabled: true
+  run_up_lookback_days: 30          # ~4-8 weeks for the prior explosive move
+  min_run_up_pct: 100.0
+  flag_lookback_days: 20            # ~3-5 weeks for the tight flag/consolidation
+  max_flag_depth_pct: 25.0
+  breakout_volume_ratio_min: 1.4
+  volume_avg_period: 50
+
+backtest:
+  initial_capital: 100000
+  risk_pct_per_trade: 1.0           # % of equity risked per trade (position sizing)
+  commission_per_share: 0.0
+  slippage_pct: 0.1
+  stop_adr_multiple: 1.0            # initial stop distance = ADR * this multiple
+  partial_profit_r_multiple: 1.0    # scale out first tranche at this many R
+  partial_profit_fraction: 0.5      # fraction of position sold at the partial target
+  trail_ema_period: 20              # trail remainder using a close below this EMA
+  max_positions: 10                 # portfolio-level concurrent position cap
+  entry_delay_days: 1               # enter next bar's open after the signal
