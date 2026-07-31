@@ -14,18 +14,19 @@ from settings import UniverseSettings
 
 def build_universe(client: FMPClient, settings: UniverseSettings) -> list:
     """Return a sorted, de-duplicated list of ticker symbols matching the
-    coarse universe filters, capped at settings.max_symbols."""
-    # Rough share-volume floor derived from the dollar-volume floor, using
-    # the price floor as a conservative divisor -- refined precisely later.
-    approx_volume_floor = None
-    if settings.min_avg_dollar_volume and settings.min_price:
-        approx_volume_floor = settings.min_avg_dollar_volume / max(settings.min_price, 1.0)
+    coarse universe filters, capped at settings.max_symbols.
 
+    Deliberately does NOT try to approximate the dollar-volume liquidity
+    floor here: FMP's screener only filters on raw *share* volume, and
+    share count varies wildly with price (a $2 stock and a $200 stock can
+    have the same dollar volume with a 100x difference in share count), so
+    any fixed conversion is wrong for most of the universe. The precise
+    dollar-volume filter is applied for real in scanner.py, after actual
+    price/volume history is fetched -- see filter_by_liquidity()."""
     base_filters = {
         "priceMoreThan": settings.min_price,
         "marketCapMoreThan": settings.min_market_cap,
         "marketCapLowerThan": settings.max_market_cap or None,
-        "volumeMoreThan": approx_volume_floor,
         "isEtf": False if settings.exclude_etf else None,
         "isFund": False if settings.exclude_funds else None,
         "isActivelyTrading": True,

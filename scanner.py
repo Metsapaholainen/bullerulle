@@ -9,6 +9,7 @@ against the same in-memory/cached history in a second or two.
 """
 from __future__ import annotations
 
+import copy
 from typing import Optional
 
 import pandas as pd
@@ -58,10 +59,41 @@ def load_scan_universe_history(
     start = (as_of_dt - pd.Timedelta(days=lookback_calendar_days)).strftime("%Y-%m-%d")
     end = as_of_dt.strftime("%Y-%m-%d")
 
-    if symbols is None:
+    auto_built = symbols is None
+    if auto_built:
         symbols = build_universe(client, settings.universe)
 
-    return get_history_bulk(client, symbols, start, end, on_progress=on_progress)
+    history = get_history_bulk(client, symbols, start, end, on_progress=on_progress)
+
+    # Only apply the liquidity floor to an auto-built (whole-market) universe --
+    # if you explicitly typed in custom symbols, you get exactly those symbols,
+    # regardless of liquidity.
+    if auto_built:
+        history = filter_by_liquidity(history, settings.universe.min_avg_dollar_volume)
+
+    return history
+
+
+def filter_by_liquidity(history: dict, min_avg_dollar_volume: float, lookback_days: int = 20) -> dict:
+    """Precise post-fetch liquidity filter: drop symbols whose trailing
+    `lookback_days`-day average *dollar* volume (close * volume) falls below
+    `min_avg_dollar_volume`. This is exact, unlike trying to approximate a
+    dollar-volume floor as a raw share-volume filter at the FMP screener
+    level (share count for the same dollar volume varies wildly with price,
+    so any fixed conversion there is wrong for most of the universe)."""
+    if not min_avg_dollar_volume:
+        return history
+    out = {}
+    for symbol, df in history.items():
+        if df.empty:
+            continue
+        if len(df) < lookback_days:
+            out[symbol] = df  # too little history to judge yet -- don't punish new listings
+            continue
+        dollar_volume = (df["close"] * df["volume"]).tail(lookback_days).mean()
+        if dollar_volume >= min_avg_dollar_volume:
+            out[symbol] = df
+    return out
 
 
 def enabled_setup_names(settings: Settings) -> list:
@@ -185,14 +217,112 @@ def relative_strength_resilience(
     return df.sort_values(sort_cols, ascending=False).reset_index(drop=True)
 
 
+def market_direction(benchmark_df: pd.DataFrame) -> dict:
+    """Classify the broad market's trend from the benchmark's (default SPY)
+    price relative to its 50/200-day moving averages -- the "M" in CANSLIM.
+    O'Neil's core premise: about three out of four stocks tend to follow the
+    market's overall direction, so it's worth knowing before acting on any
+    individual scan match, win or lose.
+
+    Returns {"direction": "Uptrend"|"Downtrend"|"Choppy / Mixed", "emoji": str,
+    "detail": str, "close": float, "sma50": float, "sma200": float} or an
+    empty dict if there isn't enough history yet (needs 200+ bars)."""
+    if benchmark_df is None or benchmark_df.empty or len(benchmark_df) < 200:
+        return {}
+
+    close = benchmark_df["close"].dropna()
+    sma50 = close.rolling(50).mean().iloc[-1]
+    sma200 = close.rolling(200).mean().iloc[-1]
+    last = close.iloc[-1]
+    above50 = last > sma50
+    above200 = last > sma200
+    golden_cross = sma50 > sma200
+
+    if above50 and above200 and golden_cross:
+        direction, emoji = "Uptrend", "🟢"
+        detail = "Above both the 50- and 200-day average, with the 50 above the 200 -- a healthy backdrop for long setups."
+    elif not above50 and not above200 and not golden_cross:
+        direction, emoji = "Downtrend", "🔴"
+        detail = "Below both the 50- and 200-day average, with the 50 below the 200 -- a hostile backdrop; most breakouts fail in conditions like this."
+    else:
+        direction, emoji = "Choppy / Mixed", "🟡"
+        detail = "Mixed signals between the 50/200-day averages -- no clear trend either way; be more selective and size down."
+
+    return {
+        "direction": direction,
+        "emoji": emoji,
+        "detail": detail,
+        "close": float(last),
+        "sma50": float(sma50),
+        "sma200": float(sma200),
+    }
+
+
+# Auto-detect: instead of requiring one exact window-length per pattern
+# (e.g. "the cup is exactly 130 days"), sweep a handful of realistic sizes
+# spanning what O'Neil's book actually documents, and count it a match if
+# *any* of them fits. Depth/quality thresholds (min/max % fields) stay as
+# range checks from the current settings -- only the window-length fields
+# (how wide/long the pattern is) get swept, since that's what forces you to
+# guess a stock's exact pattern size today.
+PATTERN_SIZE_VARIANTS = {
+    "breakout": [
+        {"max_consolidation_days": d, "min_consolidation_days": max(5, int(d * 0.4))}
+        for d in (20, 30, 40, 55, 70)
+    ],
+    "episodic_pivot": [{"lookback_base_days": d} for d in (10, 15, 20, 30, 40)],
+    "parabolic_short": [{"run_up_lookback_days": d} for d in (10, 15, 20, 30)],
+    "cup_with_handle": [
+        {
+            "cup_lookback_days": d,
+            "left_peak_days": max(10, d // 3),
+            "handle_lookback_days": max(8, d // 9),
+            "prior_uptrend_lookback_days": max(30, d // 3),
+        }
+        for d in (45, 65, 90, 130, 180, 250)  # ~9-50 weeks, spanning O'Neil's 7-65wk range
+    ],
+    "double_bottom": [{"pattern_lookback_days": d} for d in (30, 45, 65, 90, 120)],
+    "flat_base": [{"base_days": d} for d in (15, 20, 25, 35, 50)],
+    "ascending_base": [{"pattern_lookback_days": d} for d in (45, 60, 75, 100, 130)],
+    "high_tight_flag": [
+        {"flag_lookback_days": d, "run_up_lookback_days": int(d * 1.5)} for d in (12, 18, 25, 35)
+    ],
+}
+
+
+def build_size_variants(base_settings: Settings, setup_name: str) -> list:
+    """Returns a list of setup-settings objects (deep copies of the base
+    setup's settings with different window-length fields) spanning that
+    pattern's realistic size range. With no registered variants for a setup,
+    just returns its current settings unchanged."""
+    spec = SETUP_REGISTRY[setup_name]
+    base = getattr(base_settings, spec["settings_attr"])
+    overrides_list = PATTERN_SIZE_VARIANTS.get(setup_name)
+    if not overrides_list:
+        return [base]
+    variants = []
+    for overrides in overrides_list:
+        variant = copy.deepcopy(base)
+        for field, value in overrides.items():
+            setattr(variant, field, value)
+        variants.append(variant)
+    return variants
+
+
 def run_scan(
     settings: Settings,
     history: dict,
     as_of: Optional[str] = None,
     setup_names: Optional[list] = None,
+    auto_detect: bool = False,
 ) -> pd.DataFrame:
     """Given already-fetched history, run every enabled setup for the most
-    recent (or `as_of`) date per symbol and return one ranked DataFrame."""
+    recent (or `as_of`) date per symbol and return one ranked DataFrame.
+
+    With `auto_detect=True`, each setup is tried across several realistic
+    pattern sizes (see PATTERN_SIZE_VARIANTS) instead of just the one
+    exact size in `settings` -- a symbol counts as a match if *any* size
+    fits, and the best-scoring size's diagnostics are kept."""
     setup_names = setup_names or enabled_setup_names(settings)
     if not setup_names or not history:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
@@ -220,12 +350,25 @@ def run_scan(
 
         for setup_name in setup_names:
             spec = SETUP_REGISTRY[setup_name]
-            setup_settings = getattr(settings, spec["settings_attr"])
-            result = spec["module"].scan(enriched, setup_settings, rs_rating=rs_series)
-            if eval_date not in result.index:
-                continue
-            row = result.loc[eval_date]
-            if bool(row.get("match", False)):
+            variants = (
+                build_size_variants(settings, setup_name)
+                if auto_detect
+                else [getattr(settings, spec["settings_attr"])]
+            )
+
+            best_row = None
+            best_variant_settings = None
+            for variant_settings in variants:
+                result = spec["module"].scan(enriched, variant_settings, rs_rating=rs_series)
+                if eval_date not in result.index:
+                    continue
+                candidate = result.loc[eval_date]
+                if bool(candidate.get("match", False)):
+                    if best_row is None or candidate.get("score", 0) > best_row.get("score", 0):
+                        best_row = candidate
+                        best_variant_settings = variant_settings
+
+            if best_row is not None:
                 record = {
                     "symbol": symbol,
                     "setup": spec["label"],
@@ -233,7 +376,14 @@ def run_scan(
                     "date": eval_date,
                     "close": enriched.loc[eval_date, "close"],
                 }
-                record.update({k: v for k, v in row.items() if k != "match"})
+                record.update({k: v for k, v in best_row.items() if k != "match"})
+                # Carry the actual window-length values that produced this
+                # match (may differ from `settings`' defaults under
+                # auto_detect) so charting can shade the real size used,
+                # not whatever the Designer tab happens to be set to.
+                for overrides in PATTERN_SIZE_VARIANTS.get(setup_name, []):
+                    for field in overrides:
+                        record[field] = getattr(best_variant_settings, field, None)
                 # Always attach RS rating regardless of whether this setup's own
                 # match condition uses it, so results can be prioritized by
                 # momentum/leadership across every pattern, not just Breakout.

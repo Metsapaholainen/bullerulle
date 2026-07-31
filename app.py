@@ -21,9 +21,11 @@ from backtest.target_fit import find_parameters_for_target
 from data.cache import apply_live_quotes
 from data.fmp_client import FMPClient, FMPError
 from scanner import (
+    DEFAULT_BENCHMARK_SYMBOL,
     TIMEFRAME_LABELS,
     ensure_benchmark_loaded,
     load_scan_universe_history,
+    market_direction,
     momentum_shortlist,
     relative_strength_resilience,
     run_scan,
@@ -36,6 +38,7 @@ from setups.explanations import PATTERN_EXPLANATIONS
 from ui_helpers import render_stat_badges, style_results_dataframe
 
 LIVE_MODE_MAX_SYMBOLS = 30
+LABEL_TO_SETUP_KEY = {spec["label"]: key for key, spec in SETUP_REGISTRY.items()}
 
 st.set_page_config(page_title="Qullamaggie Scanner", layout="wide")
 
@@ -116,6 +119,13 @@ with st.sidebar:
                 symbols=symbols,
                 on_progress=on_progress,
             )
+            # Also load SPY (cheap, one extra symbol) so the market-direction
+            # banner is available without a separate step.
+            start_for_benchmark = (pd.Timestamp(as_of) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
+            ensure_benchmark_loaded(st.session_state.history, client, start_for_benchmark, str(as_of))
+            st.session_state.market_direction = market_direction(
+                st.session_state.history.get(DEFAULT_BENCHMARK_SYMBOL)
+            )
             progress.empty()
             st.success(f"Loaded {len(st.session_state.history)} symbols.")
         except Exception as exc:
@@ -143,6 +153,20 @@ with st.sidebar:
 settings: Settings = st.session_state.settings
 history = st.session_state.history
 
+# CANSLIM's "M" -- market direction. O'Neil's premise: ~3 of every 4 stocks
+# follow the broad market's trend, so this is shown up top on every tab as
+# context for reading any individual match, not tucked away in a submenu.
+md = st.session_state.get("market_direction")
+if md:
+    st.markdown(
+        f"""<div style="border:1px solid #444; border-radius:8px; padding:8px 14px; margin-bottom:10px;">
+<b>{md['emoji']} Market ({DEFAULT_BENCHMARK_SYMBOL}): {md['direction']}</b> -- {md['detail']}
+</div>""",
+        unsafe_allow_html=True,
+    )
+elif history:
+    st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY benchmark.")
+
 tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_settings = st.tabs(
     ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Settings"]
 )
@@ -151,7 +175,56 @@ tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_settings = st
 # --------------------------------------------------------------------------
 # Chart helper
 # --------------------------------------------------------------------------
-def plot_symbol(df: pd.DataFrame, symbol: str, marker_date=None):
+CHART_PERIODS = {
+    "1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504, "All": None,
+}
+
+
+def slice_for_period(df: pd.DataFrame, period_label: str) -> pd.DataFrame:
+    days = CHART_PERIODS.get(period_label)
+    if not days or len(df) <= days:
+        return df
+    return df.tail(days)
+
+
+# For each setup: which settings fields define the lookback window(s) worth
+# shading on the chart (field_name, label, fill color), so you can see
+# exactly which candles the detector considered -- not just the day it fired.
+PATTERN_WINDOW_FIELDS = {
+    "breakout": [("max_consolidation_days", "Base", "rgba(100,149,237,0.15)")],
+    "episodic_pivot": [("lookback_base_days", "Prior base", "rgba(100,149,237,0.15)")],
+    "parabolic_short": [("run_up_lookback_days", "Run-up", "rgba(255,0,0,0.10)")],
+    "cup_with_handle": [
+        ("cup_lookback_days", "Cup", "rgba(100,149,237,0.12)"),
+        ("handle_lookback_days", "Handle", "rgba(255,165,0,0.30)"),
+    ],
+    "double_bottom": [("pattern_lookback_days", "W pattern", "rgba(100,149,237,0.15)")],
+    "flat_base": [("base_days", "Base", "rgba(100,149,237,0.15)")],
+    "ascending_base": [("pattern_lookback_days", "Ascending base", "rgba(100,149,237,0.15)")],
+    "high_tight_flag": [
+        ("run_up_lookback_days", "Run-up", "rgba(255,0,0,0.08)"),
+        ("flag_lookback_days", "Flag", "rgba(255,165,0,0.30)"),
+    ],
+}
+# Whichever of these diagnostic columns is present holds the pattern's key
+# breakout/resistance level, drawn as a horizontal reference line.
+RESISTANCE_FIELDS = ["resistance", "pivot", "base_high", "middle_peak"]
+
+
+def compute_adr_pct_at(df: pd.DataFrame, date, lookback: int = 20):
+    """ADR% (mean of high/low - 1, over the trailing `lookback` bars ending
+    at `date`) -- the same fallback formula the backtest engine itself uses
+    to size stops, so the chart's stop/target lines match what a real trade
+    would actually use."""
+    window = df.loc[:date].tail(lookback)
+    if window.empty:
+        return None
+    return float(((window["high"] / window["low"] - 1.0) * 100.0).mean())
+
+
+def plot_symbol(
+    df: pd.DataFrame, symbol: str, marker_date=None, setup_key=None, settings=None, row=None, side="long"
+):
     fig = go.Figure()
     fig.add_trace(
         go.Candlestick(
@@ -161,8 +234,101 @@ def plot_symbol(df: pd.DataFrame, symbol: str, marker_date=None):
     for period, color in ((10, "orange"), (20, "blue")):
         ema = df["close"].ewm(span=period, adjust=False).mean()
         fig.add_trace(go.Scatter(x=df.index, y=ema, line=dict(width=1, color=color), name=f"EMA{period}"))
+
     if marker_date is not None and marker_date in df.index:
-        fig.add_vline(x=marker_date, line_dash="dash", line_color="green")
+        fig.add_vline(x=marker_date, line_dash="dash", line_color="green", annotation_text="signal day")
+
+        if setup_key and settings is not None and setup_key in PATTERN_WINDOW_FIELDS:
+            setup_settings = getattr(settings, SETUP_REGISTRY[setup_key]["settings_attr"])
+            marker_loc = df.index.get_loc(marker_date)
+            for field_name, label, color in PATTERN_WINDOW_FIELDS[setup_key]:
+                # Prefer the actual window size that produced this match (set
+                # by auto-detect, which may differ from the Designer tab's
+                # current default) over the settings object's fixed value.
+                row_value = row.get(field_name) if row is not None and hasattr(row, "get") else None
+                window_days = row_value if row_value is not None and pd.notna(row_value) else getattr(
+                    setup_settings, field_name, None
+                )
+                if not window_days:
+                    continue
+                start_loc = max(marker_loc - int(window_days), 0)
+                fig.add_vrect(
+                    x0=df.index[start_loc], x1=marker_date, fillcolor=color, line_width=0,
+                    annotation_text=label, annotation_position="top left",
+                )
+
+        if row is not None:
+            for field in RESISTANCE_FIELDS:
+                value = row.get(field) if hasattr(row, "get") else None
+                if value is not None and pd.notna(value):
+                    fig.add_hline(
+                        y=value, line_dash="dot", line_color="yellow",
+                        annotation_text=f"{field} = {value:.2f}", annotation_position="right",
+                    )
+                    break
+
+        # An explicit marker right on the breakout candle -- dashed lines
+        # spanning the whole chart can be easy to lose among the candles,
+        # so this pins down exactly which bar triggered the signal.
+        breakout_high = df.loc[marker_date, "high"]
+        fig.add_trace(
+            go.Scatter(
+                x=[marker_date],
+                y=[breakout_high * 1.03],
+                mode="markers+text",
+                marker=dict(symbol="star", size=16, color="lime", line=dict(width=1, color="black")),
+                text=["Breakout"],
+                textposition="top center",
+                textfont=dict(color="lime"),
+                name="Breakout day",
+                showlegend=False,
+            )
+        )
+
+        # Entry/stop/target zone -- the same ADR-based stop and R-multiple
+        # target the backtest engine actually uses, so "where to sell" on
+        # the chart matches what a real trade would do, not a guess.
+        if settings is not None:
+            marker_loc = df.index.get_loc(marker_date)
+            entry_loc = marker_loc + settings.backtest.entry_delay_days
+            if entry_loc < len(df.index):
+                entry_date = df.index[entry_loc]
+                entry_price = df.loc[entry_date, "open"]
+                is_projected = False
+            else:
+                entry_date = marker_date
+                entry_price = df.loc[marker_date, "close"]
+                is_projected = True  # no next bar yet -- this signal hasn't been entered
+
+            adr_pct = compute_adr_pct_at(df, marker_date)
+            if adr_pct and entry_price:
+                stop_distance = entry_price * (adr_pct / 100.0) * settings.backtest.stop_adr_multiple
+                sign = 1.0 if side == "long" else -1.0
+                stop_price = entry_price - sign * stop_distance
+                target_price = entry_price + sign * settings.backtest.partial_profit_r_multiple * stop_distance
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=[entry_date], y=[entry_price], mode="markers",
+                        marker=dict(symbol="diamond", size=12, color="cyan", line=dict(width=1, color="black")),
+                        name="Entry" + (" (projected)" if is_projected else ""),
+                        showlegend=False,
+                    )
+                )
+                fig.add_hline(
+                    y=stop_price, line_dash="dash", line_color="red",
+                    annotation_text=f"Stop {stop_price:.2f}", annotation_position="bottom right",
+                )
+                fig.add_hline(
+                    y=target_price, line_dash="dash", line_color="mediumseagreen",
+                    annotation_text=f"Target {target_price:.2f} ({settings.backtest.partial_profit_r_multiple:.1f}R)",
+                    annotation_position="top right",
+                )
+                lo, hi = sorted([stop_price, entry_price])
+                fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(255,0,0,0.06)", line_width=0)
+                lo, hi = sorted([entry_price, target_price])
+                fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(60,179,113,0.08)", line_width=0)
+
     fig.update_layout(height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
     return fig
 
@@ -338,13 +504,25 @@ with tab_scanner:
                 st.caption("Sorted by resilience vs. SPY first (if SPY loaded), then by prior move size.")
                 st.dataframe(resilience_df.round(2), use_container_width=True, height=300)
 
-        prefilter_momentum = st.checkbox(
-            "Pre-filter to momentum leaders before scanning for patterns",
-            value=True,
-            help="Only run pattern detection on the union of the top movers above, instead of the whole "
-            "loaded universe -- 'find the biggest movers, then see which ones are forming a pattern'.",
-            key="scanner_prefilter_momentum",
-        )
+        col_pf, col_ad = st.columns(2)
+        with col_pf:
+            prefilter_momentum = st.checkbox(
+                "Pre-filter to momentum leaders before scanning for patterns",
+                value=True,
+                help="Only run pattern detection on the union of the top movers above, instead of the whole "
+                "loaded universe -- 'find the biggest movers, then see which ones are forming a pattern'.",
+                key="scanner_prefilter_momentum",
+            )
+        with col_ad:
+            auto_detect = st.checkbox(
+                "🔍 Auto-detect pattern size (recommended)",
+                value=True,
+                help="Instead of requiring an exact cup depth/width, handle depth, base length, etc. to match "
+                "today's settings, tries several realistic sizes for each pattern (spanning what O'Neil's book "
+                "documents) and counts it a match if any of them fit. Turn this off to use the exact numbers "
+                "from the Designer tab instead.",
+                key="scanner_auto_detect",
+            )
 
         if st.button("Run Scan"):
             scan_history = history
@@ -354,7 +532,7 @@ with tab_scanner:
                 )
                 scan_history = {s: history[s] for s in shortlist if s in history}
                 st.session_state.scan_shortlist_size = len(scan_history)
-            st.session_state.last_scan = run_scan(settings, scan_history, as_of=str(as_of))
+            st.session_state.last_scan = run_scan(settings, scan_history, as_of=str(as_of), auto_detect=auto_detect)
         if prefilter_momentum and st.session_state.get("scan_shortlist_size") is not None:
             st.caption(f"Scanned {st.session_state.scan_shortlist_size} momentum-leading symbol(s), not the full universe.")
         results = st.session_state.last_scan
@@ -363,10 +541,30 @@ with tab_scanner:
         else:
             st.caption("Sorted by RS rating (momentum/leadership) first, then setup score.")
             st.dataframe(results, use_container_width=True, height=350)
-            pick = st.selectbox("Chart a match", results["symbol"].tolist())
+            col_pick, col_period = st.columns([3, 1])
+            with col_pick:
+                pick = st.selectbox("Chart a match", results["symbol"].tolist())
+            with col_period:
+                pick_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="match_chart_period")
             if pick and pick in history:
                 row = results[results["symbol"] == pick].iloc[0]
-                st.plotly_chart(plot_symbol(history[pick], pick, marker_date=row["date"]), use_container_width=True)
+                picked_setup_key = LABEL_TO_SETUP_KEY.get(row["setup"])
+                picked_side = row.get("side", "long")
+                st.plotly_chart(
+                    plot_symbol(
+                        slice_for_period(history[pick], pick_period), pick, marker_date=row["date"],
+                        setup_key=picked_setup_key, settings=settings, row=row, side=picked_side,
+                    ),
+                    use_container_width=True,
+                    key="scanner_match_chart",
+                )
+                st.caption(
+                    "Shaded blue/orange region = the window the detector looked at; yellow dotted line = "
+                    "breakout/resistance level; green star = signal day; cyan diamond = entry; red dashed = "
+                    "stop-loss; green dashed = profit target (same ADR-based stop/R-multiple target the "
+                    "backtester uses). \"Entry (projected)\" means there's no next bar yet -- the trade "
+                    "hasn't actually been entered."
+                )
 
             matched_setups = [k for k, v in SETUP_REGISTRY.items() if v["label"] in results["setup"].unique()]
             if matched_setups:
@@ -379,6 +577,59 @@ with tab_scanner:
             for setup_key, spec in SETUP_REGISTRY.items():
                 st.markdown(f"**{spec['label']}**")
                 st.write(PATTERN_EXPLANATIONS.get(setup_key, "No explanation available."))
+
+        with st.expander("🖼️ Browse all charts (eyeball any loaded stock yourself)", expanded=False):
+            st.caption(
+                "Not just matches -- flip through every symbol currently loaded, at whatever timeframe you "
+                "want, to check for patterns yourself. If the symbol also matched in the last scan, its "
+                "pattern gets shaded/annotated same as above."
+            )
+            all_symbols = sorted(history.keys())
+            if "browse_idx" not in st.session_state:
+                st.session_state.browse_idx = 0
+            st.session_state.browse_idx = max(0, min(st.session_state.browse_idx, len(all_symbols) - 1))
+
+            col_prev, col_pick2, col_next, col_period2 = st.columns([1, 3, 1, 2])
+            with col_prev:
+                if st.button("⬅ Prev", key="browse_prev"):
+                    st.session_state.browse_idx = (st.session_state.browse_idx - 1) % len(all_symbols)
+            with col_next:
+                if st.button("Next ➡", key="browse_next"):
+                    st.session_state.browse_idx = (st.session_state.browse_idx + 1) % len(all_symbols)
+            with col_pick2:
+                browse_symbol = st.selectbox(
+                    "Symbol", all_symbols, index=st.session_state.browse_idx, key="browse_symbol_select"
+                )
+                new_idx = all_symbols.index(browse_symbol)
+                if new_idx != st.session_state.browse_idx:
+                    st.session_state.browse_idx = new_idx
+            with col_period2:
+                browse_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="browse_period")
+
+            browse_symbol = all_symbols[st.session_state.browse_idx]
+            browse_df = slice_for_period(history[browse_symbol], browse_period)
+
+            browse_match = None
+            if not results.empty:
+                sym_matches = results[results["symbol"] == browse_symbol]
+                if not sym_matches.empty:
+                    browse_match = sym_matches.iloc[0]
+
+            if browse_match is not None:
+                browse_setup_key = LABEL_TO_SETUP_KEY.get(browse_match["setup"])
+                st.plotly_chart(
+                    plot_symbol(
+                        browse_df, browse_symbol, marker_date=browse_match["date"],
+                        setup_key=browse_setup_key, settings=settings, row=browse_match,
+                        side=browse_match.get("side", "long"),
+                    ),
+                    use_container_width=True,
+                    key="browse_chart",
+                )
+                st.success(f"This matched **{browse_match['setup']}** in the last scan.")
+            else:
+                st.plotly_chart(plot_symbol(browse_df, browse_symbol), use_container_width=True, key="browse_chart")
+                st.caption("No pattern match for this symbol in the last scan (or you haven't run one yet).")
 
 
 # --------------------------------------------------------------------------
@@ -537,7 +788,19 @@ with tab_finder:
             st.json({k: (str(v) if isinstance(v, pd.Timestamp) else v) for k, v in observed.items()})
 
             marker_date = observed.get("date_used")
-            st.plotly_chart(plot_symbol(history[pf_symbol], pf_symbol, marker_date=marker_date), use_container_width=True)
+            st.plotly_chart(
+                plot_symbol(
+                    history[pf_symbol], pf_symbol, marker_date=marker_date,
+                    setup_key=pf_setup, settings=settings, row=observed,
+                    side=SETUP_REGISTRY[pf_setup]["side"],
+                ),
+                use_container_width=True,
+                key="param_finder_chart",
+            )
+            st.caption(
+                "Shaded region = the window the detector looked at; dashed yellow line = its "
+                "breakout/resistance level; green line = the target date."
+            )
 
         if st.button("Search parameters that capture this"):
             progress = st.progress(0.0, text="Searching...")
@@ -676,6 +939,7 @@ with tab_live:
             live_results = run_scan(
                 st.session_state.settings,
                 {s: st.session_state.history[s] for s in watchlist},
+                auto_detect=True,
             )
             st.caption(f"Last refreshed {pd.Timestamp.now().strftime('%H:%M:%S')} -- watching {len(watchlist)} symbol(s).")
             if live_results.empty:
