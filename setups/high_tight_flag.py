@@ -35,14 +35,15 @@ def scan(df: pd.DataFrame, settings: HighTightFlagSettings, rs_rating: pd.Series
     flag_low = df["low"].shift(1).rolling(flag_window).min()
     flag_depth_pct = (flag_high - flag_low) / flag_high * 100.0
 
-    cond = pd.Series(True, index=df.index)
-    cond &= run_up_pct >= settings.min_run_up_pct
-    cond &= flag_depth_pct <= settings.max_flag_depth_pct
-    cond &= df["close"] > flag_high
-    cond &= df[vol_ratio_col] >= settings.breakout_volume_ratio_min
+    shape_cond = pd.Series(True, index=df.index)
+    shape_cond &= run_up_pct >= settings.min_run_up_pct
+    shape_cond &= flag_depth_pct <= settings.max_flag_depth_pct
+
+    cond = shape_cond & (df["close"] > flag_high) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
+    out["shape_match"] = shape_cond.fillna(False)
     out["run_up_pct"] = run_up_pct
     out["flag_depth_pct"] = flag_depth_pct
     out["volume_ratio"] = df[vol_ratio_col]

@@ -56,18 +56,22 @@ def scan(df: pd.DataFrame, settings: CupWithHandleSettings, rs_rating: pd.Series
 
     pivot = pd.concat([left_high, handle_high], axis=1).max(axis=1)
 
-    cond = pd.Series(True, index=df.index)
-    cond &= cup_depth_pct.between(settings.min_cup_depth_pct, settings.max_cup_depth_pct)
-    cond &= handle_depth_pct <= settings.max_handle_depth_pct
-    cond &= recovery_pct >= settings.min_recovery_pct
+    # Shape/quality conditions -- a valid cup-with-handle, independent of
+    # whether it's broken out yet. Separated out so "approaching pivot" can
+    # find stocks sitting in a good handle that just haven't triggered.
+    shape_cond = pd.Series(True, index=df.index)
+    shape_cond &= cup_depth_pct.between(settings.min_cup_depth_pct, settings.max_cup_depth_pct)
+    shape_cond &= handle_depth_pct <= settings.max_handle_depth_pct
+    shape_cond &= recovery_pct >= settings.min_recovery_pct
     if settings.handle_upper_half_only:
-        cond &= handle_in_upper_half
-    cond &= prior_uptrend_pct >= settings.min_prior_uptrend_pct
-    cond &= df["close"] > pivot
-    cond &= df[vol_ratio_col] >= settings.breakout_volume_ratio_min
+        shape_cond &= handle_in_upper_half
+    shape_cond &= prior_uptrend_pct >= settings.min_prior_uptrend_pct
+
+    cond = shape_cond & (df["close"] > pivot) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
+    out["shape_match"] = shape_cond.fillna(False)
     out["cup_depth_pct"] = cup_depth_pct
     out["handle_depth_pct"] = handle_depth_pct
     out["recovery_pct"] = recovery_pct

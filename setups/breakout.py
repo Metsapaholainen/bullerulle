@@ -56,25 +56,31 @@ def scan(df: pd.DataFrame, settings: BreakoutSettings, rs_rating: pd.Series = No
     else:
         rs = pd.Series(100.0, index=df.index)  # no RS data available -> don't filter on it
 
-    cond = pd.Series(True, index=df.index)
-    cond &= df[adr_col] >= settings.min_adr_pct
-    cond &= prior_move_pct.between(settings.prior_move_min_pct, settings.prior_move_max_pct)
+    # Shape/quality conditions -- everything about whether this is a *valid*
+    # base, independent of whether it's broken out yet. Used both for the
+    # final match and, on its own, to find stocks sitting in a good base that
+    # simply haven't triggered ("approaching pivot") yet.
+    shape_cond = pd.Series(True, index=df.index)
+    shape_cond &= df[adr_col] >= settings.min_adr_pct
+    shape_cond &= prior_move_pct.between(settings.prior_move_min_pct, settings.prior_move_max_pct)
     # Tightness is checked on the shorter "recent" window, not the full
     # max_consolidation_days window -- a real base is often tight for only
     # part of that lookback, with the rest still holding the prior move.
     # base_range_pct/base_high are reported as diagnostics and used as the
     # breakout resistance level, but aren't themselves a tightness filter.
-    cond &= recent_range_pct <= settings.max_consolidation_range_pct
-    cond &= df["close"] > resistance
-    cond &= df[vol_ratio_col] >= settings.breakout_volume_ratio_min
-    cond &= rs >= settings.min_rs_rating
+    shape_cond &= recent_range_pct <= settings.max_consolidation_range_pct
+    shape_cond &= rs >= settings.min_rs_rating
     if settings.require_above_ema10:
-        cond &= df["close"] > df[ema_fast_col]
+        shape_cond &= df["close"] > df[ema_fast_col]
     if settings.require_above_ema20:
-        cond &= df["close"] > df[ema_slow_col]
+        shape_cond &= df["close"] > df[ema_slow_col]
+
+    # Trigger conditions -- the actual breakout: crossing resistance on volume.
+    cond = shape_cond & (df["close"] > resistance) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
+    out["shape_match"] = shape_cond.fillna(False)
     out["adr_pct"] = df[adr_col]
     out["prior_move_pct"] = prior_move_pct
     out["base_range_pct"] = base_range_pct

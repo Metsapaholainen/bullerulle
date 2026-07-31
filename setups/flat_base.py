@@ -28,14 +28,15 @@ def scan(df: pd.DataFrame, settings: FlatBaseSettings, rs_rating: pd.Series = No
     prior_low = df["low"].shift(1 + settings.base_days).rolling(settings.prior_move_lookback_days).min()
     prior_move_pct = (prior_high - prior_low) / prior_low * 100.0
 
-    cond = pd.Series(True, index=df.index)
-    cond &= range_pct <= settings.max_range_pct
-    cond &= prior_move_pct >= settings.min_prior_move_pct
-    cond &= df["close"] > base_high
-    cond &= df[vol_ratio_col] >= settings.breakout_volume_ratio_min
+    shape_cond = pd.Series(True, index=df.index)
+    shape_cond &= range_pct <= settings.max_range_pct
+    shape_cond &= prior_move_pct >= settings.min_prior_move_pct
+
+    cond = shape_cond & (df["close"] > base_high) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
+    out["shape_match"] = shape_cond.fillna(False)
     out["range_pct"] = range_pct
     out["prior_move_pct"] = prior_move_pct
     out["volume_ratio"] = df[vol_ratio_col]

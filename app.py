@@ -24,6 +24,7 @@ from scanner import (
     DEFAULT_BENCHMARK_SYMBOL,
     TIMEFRAME_LABELS,
     ensure_benchmark_loaded,
+    find_approaching_pivot,
     load_scan_universe_history,
     market_direction,
     momentum_shortlist,
@@ -32,6 +33,7 @@ from scanner import (
     scan_signals_over_history,
     top_movers_by_timeframe,
 )
+from pattern_diagrams import get_pattern_diagram
 from settings import Settings
 from setups import SETUP_REGISTRY
 from setups.explanations import PATTERN_EXPLANATIONS
@@ -504,6 +506,42 @@ with tab_scanner:
                 st.caption("Sorted by resilience vs. SPY first (if SPY loaded), then by prior move size.")
                 st.dataframe(resilience_df.round(2), use_container_width=True, height=300)
 
+        with st.expander("🎯 Approaching pivot (sitting in a base, hasn't broken out yet)", expanded=False):
+            st.caption(
+                "The main scan only flags a stock on the exact day it breaks out -- a rare, discrete event "
+                "per stock. This instead finds stocks currently sitting inside a *valid* pattern shape that "
+                "simply haven't triggered yet, within a chosen % of the resistance/pivot level -- a watchlist "
+                "for what might move next, not just what already did."
+            )
+            pivot_distance = st.slider(
+                "Max distance from pivot (%)", 1.0, 20.0, 8.0, 1.0, key="pivot_distance_pct",
+                help="How close (in either direction) to the breakout level counts as 'approaching'.",
+            )
+            if st.button("Find stocks approaching a pivot"):
+                st.session_state.approaching_df = find_approaching_pivot(
+                    settings, history, as_of=str(as_of), max_distance_pct=pivot_distance
+                )
+            approaching_df = st.session_state.get("approaching_df")
+            if approaching_df is not None and not approaching_df.empty:
+                st.caption("Sorted closest-to-triggering first. Negative pct_to_pivot means it's already just above the level, waiting on volume to confirm.")
+                st.dataframe(approaching_df.round(2), use_container_width=True, height=300)
+                pick_approach = st.selectbox(
+                    "Chart one", approaching_df["symbol"].tolist(), key="approach_chart_pick"
+                )
+                if pick_approach and pick_approach in history:
+                    arow = approaching_df[approaching_df["symbol"] == pick_approach].iloc[0]
+                    a_setup_key = LABEL_TO_SETUP_KEY.get(arow["setup"])
+                    st.plotly_chart(
+                        plot_symbol(
+                            history[pick_approach], pick_approach, marker_date=arow["date"],
+                            setup_key=a_setup_key, settings=settings, row=arow, side=arow.get("side", "long"),
+                        ),
+                        use_container_width=True,
+                        key="approach_chart",
+                    )
+            elif approaching_df is not None:
+                st.caption("Nothing within that distance right now -- try widening the % above.")
+
         col_pf, col_ad = st.columns(2)
         with col_pf:
             prefilter_momentum = st.checkbox(
@@ -574,9 +612,17 @@ with tab_scanner:
                         st.write(PATTERN_EXPLANATIONS.get(setup_key, "No explanation available."))
 
         with st.expander("📖 Pattern library (all setups, whether matched or not)"):
+            st.caption("Diagrams are idealized schematics illustrating the shape -- not real ticker data.")
             for setup_key, spec in SETUP_REGISTRY.items():
                 st.markdown(f"**{spec['label']}**")
-                st.write(PATTERN_EXPLANATIONS.get(setup_key, "No explanation available."))
+                diagram_col, text_col = st.columns([1, 1])
+                with diagram_col:
+                    diagram = get_pattern_diagram(setup_key)
+                    if diagram is not None:
+                        st.plotly_chart(diagram, use_container_width=True, key=f"pattern_diagram_{setup_key}")
+                with text_col:
+                    st.write(PATTERN_EXPLANATIONS.get(setup_key, "No explanation available."))
+                st.divider()
 
         with st.expander("🖼️ Browse all charts (eyeball any loaded stock yourself)", expanded=False):
             st.caption(

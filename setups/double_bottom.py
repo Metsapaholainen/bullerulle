@@ -34,14 +34,15 @@ def scan(df: pd.DataFrame, settings: DoubleBottomSettings, rs_rating: pd.Series 
     depth_pct = (middle_peak - lower_low) / middle_peak * 100.0
     low_difference_pct = (low2 - low1).abs() / low1 * 100.0
 
-    cond = pd.Series(True, index=df.index)
-    cond &= depth_pct.between(settings.min_depth_pct, settings.max_depth_pct)
-    cond &= low_difference_pct <= settings.max_low_difference_pct
-    cond &= df["close"] > middle_peak
-    cond &= df[vol_ratio_col] >= settings.breakout_volume_ratio_min
+    shape_cond = pd.Series(True, index=df.index)
+    shape_cond &= depth_pct.between(settings.min_depth_pct, settings.max_depth_pct)
+    shape_cond &= low_difference_pct <= settings.max_low_difference_pct
+
+    cond = shape_cond & (df["close"] > middle_peak) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
+    out["shape_match"] = shape_cond.fillna(False)
     out["depth_pct"] = depth_pct
     out["low_difference_pct"] = low_difference_pct
     out["volume_ratio"] = df[vol_ratio_col]

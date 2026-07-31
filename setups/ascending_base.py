@@ -42,15 +42,16 @@ def scan(df: pd.DataFrame, settings: AscendingBaseSettings, rs_rating: pd.Series
     seg3_depth_pct = (high_seg3 - low_seg3) / high_seg3 * 100.0
     max_segment_depth = pd.concat([seg1_depth_pct, seg2_depth_pct, seg3_depth_pct], axis=1).max(axis=1)
 
-    cond = pd.Series(True, index=df.index)
-    cond &= ascending_lows
-    cond &= ascending_highs
-    cond &= max_segment_depth.between(settings.min_segment_depth_pct, settings.max_segment_depth_pct)
-    cond &= df["close"] > high_seg3
-    cond &= df[vol_ratio_col] >= settings.breakout_volume_ratio_min
+    shape_cond = pd.Series(True, index=df.index)
+    shape_cond &= ascending_lows
+    shape_cond &= ascending_highs
+    shape_cond &= max_segment_depth.between(settings.min_segment_depth_pct, settings.max_segment_depth_pct)
+
+    cond = shape_cond & (df["close"] > high_seg3) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
+    out["shape_match"] = shape_cond.fillna(False)
     out["max_segment_depth_pct"] = max_segment_depth
     out["volume_ratio"] = df[vol_ratio_col]
     out["resistance"] = high_seg3

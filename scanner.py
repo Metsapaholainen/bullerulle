@@ -404,6 +404,114 @@ def run_scan(
     )
 
 
+# Setups with a meaningful "sitting in a valid base, hasn't triggered yet"
+# state, mapped to the diagnostic column holding their resistance/pivot
+# level. Excludes episodic_pivot (a gap event, not something you sit inside)
+# and parabolic_short (an ongoing extension, not a level you approach).
+APPROACHING_PIVOT_SETUPS = {
+    "breakout": "resistance",
+    "cup_with_handle": "pivot",
+    "double_bottom": "middle_peak",
+    "flat_base": "base_high",
+    "ascending_base": "resistance",
+    "high_tight_flag": "resistance",
+}
+
+
+def find_approaching_pivot(
+    settings: Settings,
+    history: dict,
+    as_of: Optional[str] = None,
+    setup_names: Optional[list] = None,
+    max_distance_pct: float = 8.0,
+    auto_detect: bool = True,
+) -> pd.DataFrame:
+    """Stocks sitting inside a *valid* base/pattern shape that haven't
+    triggered the actual breakout yet -- within `max_distance_pct`% of the
+    resistance/pivot level (either just under it, or just over it without
+    volume having confirmed yet). Complements run_scan(), which only shows
+    the exact day a stock already broke out."""
+    candidates = setup_names or enabled_setup_names(settings)
+    setup_names = [s for s in candidates if s in APPROACHING_PIVOT_SETUPS]
+    if not setup_names or not history:
+        return pd.DataFrame(columns=["symbol", "setup", "date", "close", "pivot", "pct_to_pivot"])
+
+    close_panel = build_close_panel(history)
+    if close_panel.empty:
+        return pd.DataFrame(columns=["symbol", "setup", "date", "close", "pivot", "pct_to_pivot"])
+
+    rs_panel = compute_rs_rating_panel(
+        close_panel, settings.rs_rating.lookback_periods, settings.rs_rating.period_weights
+    )
+    as_of_ts = pd.Timestamp(as_of) if as_of else close_panel.index.max()
+
+    rows = []
+    for symbol, raw_df in history.items():
+        if raw_df.empty:
+            continue
+        df_upto = raw_df.loc[:as_of_ts]
+        if df_upto.empty:
+            continue
+        eval_date = df_upto.index.max()
+
+        enriched = add_core_indicators(df_upto)
+        rs_series = rs_panel[symbol] if symbol in rs_panel.columns else None
+        close_price = enriched.loc[eval_date, "close"]
+
+        for setup_name in setup_names:
+            spec = SETUP_REGISTRY[setup_name]
+            pivot_field = APPROACHING_PIVOT_SETUPS[setup_name]
+            variants = (
+                build_size_variants(settings, setup_name)
+                if auto_detect
+                else [getattr(settings, spec["settings_attr"])]
+            )
+
+            best = None
+            for variant_settings in variants:
+                result = spec["module"].scan(enriched, variant_settings, rs_rating=rs_series)
+                if eval_date not in result.index:
+                    continue
+                candidate = result.loc[eval_date]
+                if not bool(candidate.get("shape_match", False)):
+                    continue
+                if bool(candidate.get("match", False)):
+                    continue  # already broken out -- that's run_scan's job, not this
+                pivot_value = candidate.get(pivot_field)
+                if pivot_value is None or pd.isna(pivot_value) or pivot_value <= 0:
+                    continue
+                pct_to_pivot = (pivot_value - close_price) / close_price * 100.0
+                if abs(pct_to_pivot) > max_distance_pct:
+                    continue
+                if best is None or abs(pct_to_pivot) < abs(best["pct_to_pivot"]):
+                    best = {"pct_to_pivot": pct_to_pivot, "pivot": pivot_value, "row": candidate, "variant": variant_settings}
+
+            if best is not None:
+                record = {
+                    "symbol": symbol,
+                    "setup": spec["label"],
+                    "side": spec["side"],
+                    "date": eval_date,
+                    "close": close_price,
+                    "pivot": best["pivot"],
+                    "pct_to_pivot": best["pct_to_pivot"],
+                }
+                record["rs_rating"] = rs_series.get(eval_date) if rs_series is not None else float("nan")
+                for overrides in PATTERN_SIZE_VARIANTS.get(setup_name, []):
+                    for field in overrides:
+                        record[field] = getattr(best["variant"], field, None)
+                rows.append(record)
+
+    if not rows:
+        return pd.DataFrame(columns=["symbol", "setup", "date", "close", "pivot", "pct_to_pivot"])
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(by="pct_to_pivot", key=lambda s: s.abs(), ascending=True)
+        .reset_index(drop=True)
+    )
+
+
 def scan_signals_over_history(
     settings: Settings,
     history: dict,
