@@ -60,13 +60,22 @@ def load_scan_universe_history(
     client: Optional[FMPClient] = None,
     symbols: Optional[list] = None,
     on_progress=None,
+    min_history_days: Optional[int] = None,
 ) -> dict:
     """Builds (or reuses a given) universe and returns {symbol: OHLCV
     DataFrame} covering enough history for every indicator/setup, ending at
-    `as_of` (defaults to today)."""
+    `as_of` (defaults to today).
+
+    `min_history_days` (calendar days) lets a caller request *more* history
+    than the auto-computed minimum -- e.g. to backtest over several years
+    instead of just enough bars to satisfy the longest pattern window/RS
+    lookback. It only ever extends the window, never shrinks it below what
+    indicators/setups actually need."""
     client = client or FMPClient()
     as_of_dt = pd.Timestamp(as_of) if as_of else pd.Timestamp.today().normalize()
     lookback_calendar_days = int(history_lookback_days(settings) * 1.6)  # pad for weekends/holidays
+    if min_history_days:
+        lookback_calendar_days = max(lookback_calendar_days, int(min_history_days))
     start = (as_of_dt - pd.Timedelta(days=lookback_calendar_days)).strftime("%Y-%m-%d")
     end = as_of_dt.strftime("%Y-%m-%d")
 

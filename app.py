@@ -25,6 +25,7 @@ from scanner import (
     TIMEFRAME_LABELS,
     ensure_benchmark_loaded,
     find_approaching_pivot,
+    history_lookback_days,
     load_scan_universe_history,
     market_direction,
     momentum_shortlist,
@@ -94,6 +95,17 @@ with st.sidebar:
     )
     as_of = st.date_input("As-of date", value=pd.Timestamp.today())
 
+    _auto_min_days = int(history_lookback_days(st.session_state.settings) * 1.6)
+    history_years = st.slider(
+        "History to load (years)", 1.0, 10.0, max(2.0, round(_auto_min_days / 365.25 * 2) / 2), 0.5,
+        key="history_years",
+        help=f"How far back to fetch price data -- this is what the Backtest tab can actually test over, "
+        f"not just what the live scan needs. The current settings need at least ~{_auto_min_days / 365.25:.1f} "
+        "years of history for indicators to compute correctly; raising this doesn't change scan results, "
+        "it only gives the backtester a longer, more statistically meaningful window (and means a slower "
+        "'Load / Refresh Data', since more bars per symbol get fetched).",
+    )
+
     with st.expander("Universe filters (market cap, liquidity, momentum)"):
         u = st.session_state.settings.universe
         u.min_market_cap = st.number_input(
@@ -130,6 +142,7 @@ with st.sidebar:
                 client=client,
                 symbols=symbols,
                 on_progress=on_progress,
+                min_history_days=int(history_years * 365.25),
             )
             # Also load SPY (cheap, one extra symbol) so the market-direction
             # banner is available without a separate step.
@@ -207,6 +220,43 @@ def slice_for_period(df: pd.DataFrame, period_label: str) -> pd.DataFrame:
     if not days or len(df) <= days:
         return df
     return df.tail(days)
+
+
+AUTO_CHART_PERIOD = "Auto (fits the pattern)"
+
+
+def recommended_period_days(row, setup_key: str, settings: Settings) -> int:
+    """A fixed '1 year' default squeezes a 3-week flag or a 10-week Double
+    Bottom into mostly-irrelevant history, while barely fitting a 9-month
+    Cup with Handle. Instead, size the chart to the *actual* pattern window
+    used for this specific match (from auto-detect, if that's what found
+    it) plus margin for context -- a short pattern gets a tight zoom, a long
+    one gets a wide one."""
+    if row is None or not setup_key or setup_key not in PATTERN_WINDOW_FIELDS or settings is None:
+        return CHART_PERIODS["1 year"]
+    setup_settings = getattr(settings, SETUP_REGISTRY[setup_key]["settings_attr"], None)
+    window_days = 0
+    for field_name, _, _ in PATTERN_WINDOW_FIELDS[setup_key]:
+        row_value = row.get(field_name) if hasattr(row, "get") else None
+        value = row_value if row_value is not None and pd.notna(row_value) else getattr(setup_settings, field_name, None)
+        if value:
+            window_days = max(window_days, int(value))
+    if window_days <= 0:
+        return CHART_PERIODS["1 year"]
+    # Show the pattern window plus ~60% margin beforehand (the quiet
+    # history leading into it), with a floor so very short patterns still
+    # get enough surrounding context to read.
+    return max(int(window_days * 1.6), 60)
+
+
+def resolve_chart_df(full_df: pd.DataFrame, period_label: str, row=None, setup_key: str = None, settings: Settings = None) -> pd.DataFrame:
+    """Shared by every 'Chart period' picker: resolves the Auto option
+    against a specific match's row/setup, otherwise defers to the fixed
+    CHART_PERIODS buckets."""
+    if period_label == AUTO_CHART_PERIOD:
+        days = recommended_period_days(row, setup_key, settings)
+        return full_df.tail(days) if days and len(full_df) > days else full_df
+    return slice_for_period(full_df, period_label)
 
 
 # For each setup: which settings fields define the lookback window(s) worth
@@ -721,16 +771,20 @@ with tab_scanner:
             col_pick, col_period = st.columns([3, 1])
             with col_pick:
                 pick = st.selectbox("Chart a match", results["symbol"].tolist())
+            row = results[results["symbol"] == pick].iloc[0] if pick else None
+            picked_setup_key = LABEL_TO_SETUP_KEY.get(row["setup"]) if row is not None else None
             with col_period:
-                pick_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="match_chart_period")
+                pick_period = st.selectbox(
+                    "Chart period", [AUTO_CHART_PERIOD] + list(CHART_PERIODS.keys()), index=0, key="match_chart_period",
+                    help="Auto sizes the chart to this specific match's actual pattern window (e.g. a 3-week flag "
+                    "gets a tight zoom, a 9-month cup gets a wide one) instead of a fixed calendar period.",
+                )
             if pick and pick in history:
-                row = results[results["symbol"] == pick].iloc[0]
-                picked_setup_key = LABEL_TO_SETUP_KEY.get(row["setup"])
                 picked_side = row.get("side", "long")
                 st.plotly_chart(
                     plot_symbol(
-                        slice_for_period(history[pick], pick_period), pick, marker_date=row["date"],
-                        setup_key=picked_setup_key, settings=settings, row=row, side=picked_side,
+                        resolve_chart_df(history[pick], pick_period, row, picked_setup_key, settings), pick,
+                        marker_date=row["date"], setup_key=picked_setup_key, settings=settings, row=row, side=picked_side,
                     ),
                     use_container_width=True,
                     key="scanner_match_chart",
@@ -770,29 +824,35 @@ with tab_scanner:
                 "pattern gets shaded/annotated same as above."
             )
             all_symbols = sorted(history.keys())
-            if "browse_idx" not in st.session_state:
-                st.session_state.browse_idx = 0
-            st.session_state.browse_idx = max(0, min(st.session_state.browse_idx, len(all_symbols) - 1))
+            # The Symbol selectbox owns its displayed value via its `key`
+            # once set -- Streamlit ignores a later `index=` argument on a
+            # keyed widget, so Prev/Next must update that SAME key directly
+            # (before the selectbox is instantiated this run), not a
+            # separate index variable, or the click gets silently
+            # overwritten by the selectbox reading back its own stale
+            # keyed state a few lines later.
+            if (
+                "browse_symbol_select" not in st.session_state
+                or st.session_state.browse_symbol_select not in all_symbols
+            ):
+                st.session_state.browse_symbol_select = all_symbols[0]
+            current_bidx = all_symbols.index(st.session_state.browse_symbol_select)
 
             col_prev, col_pick2, col_next, col_period2 = st.columns([1, 3, 1, 2])
             with col_prev:
                 if st.button("⬅ Prev", key="browse_prev"):
-                    st.session_state.browse_idx = (st.session_state.browse_idx - 1) % len(all_symbols)
+                    st.session_state.browse_symbol_select = all_symbols[(current_bidx - 1) % len(all_symbols)]
             with col_next:
                 if st.button("Next ➡", key="browse_next"):
-                    st.session_state.browse_idx = (st.session_state.browse_idx + 1) % len(all_symbols)
+                    st.session_state.browse_symbol_select = all_symbols[(current_bidx + 1) % len(all_symbols)]
             with col_pick2:
-                browse_symbol = st.selectbox(
-                    "Symbol", all_symbols, index=st.session_state.browse_idx, key="browse_symbol_select"
-                )
-                new_idx = all_symbols.index(browse_symbol)
-                if new_idx != st.session_state.browse_idx:
-                    st.session_state.browse_idx = new_idx
+                browse_symbol = st.selectbox("Symbol", all_symbols, key="browse_symbol_select")
             with col_period2:
-                browse_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="browse_period")
-
-            browse_symbol = all_symbols[st.session_state.browse_idx]
-            browse_df = slice_for_period(history[browse_symbol], browse_period)
+                browse_period = st.selectbox(
+                    "Chart period", [AUTO_CHART_PERIOD] + list(CHART_PERIODS.keys()), index=0, key="browse_period",
+                    help="Auto sizes to this symbol's actual matched pattern window, if it matched; otherwise falls "
+                    "back to 1 year.",
+                )
 
             browse_match = None
             if not results.empty:
@@ -800,8 +860,10 @@ with tab_scanner:
                 if not sym_matches.empty:
                     browse_match = sym_matches.iloc[0]
 
+            browse_setup_key = LABEL_TO_SETUP_KEY.get(browse_match["setup"]) if browse_match is not None else None
+            browse_df = resolve_chart_df(history[browse_symbol], browse_period, browse_match, browse_setup_key, settings)
+
             if browse_match is not None:
-                browse_setup_key = LABEL_TO_SETUP_KEY.get(browse_match["setup"])
                 st.plotly_chart(
                     plot_symbol(
                         browse_df, browse_symbol, marker_date=browse_match["date"],
@@ -907,30 +969,33 @@ with tab_scanner:
                     f"{r['symbol']} -- {r['scan']} ({pd.Timestamp(r['date']).date()})"
                     for _, r in legout_results.iterrows()
                 ]
-                if "legout_chart_idx" not in st.session_state:
-                    st.session_state.legout_chart_idx = 0
-                st.session_state.legout_chart_idx = max(
-                    0, min(st.session_state.legout_chart_idx, len(legout_match_labels) - 1)
-                )
+                # The selectbox below owns its displayed value via its `key`
+                # once set -- Streamlit ignores a later `index=` argument on
+                # a keyed widget, so Prev/Next must update the SAME key
+                # directly (before the selectbox is instantiated this run),
+                # not a separate index variable, or the click gets silently
+                # overwritten by the selectbox reading back its own stale
+                # keyed state a few lines later.
+                if (
+                    "legout_chart_pick" not in st.session_state
+                    or st.session_state.legout_chart_pick not in legout_match_labels
+                ):
+                    st.session_state.legout_chart_pick = legout_match_labels[0]
+                current_lidx = legout_match_labels.index(st.session_state.legout_chart_pick)
 
                 col_lprev, col_lpick, col_lnext, col_lperiod = st.columns([1, 3, 1, 2])
                 with col_lprev:
                     if st.button("⬅ Prev", key="legout_prev"):
-                        st.session_state.legout_chart_idx = (st.session_state.legout_chart_idx - 1) % len(legout_match_labels)
+                        st.session_state.legout_chart_pick = legout_match_labels[(current_lidx - 1) % len(legout_match_labels)]
                 with col_lnext:
                     if st.button("Next ➡", key="legout_next"):
-                        st.session_state.legout_chart_idx = (st.session_state.legout_chart_idx + 1) % len(legout_match_labels)
+                        st.session_state.legout_chart_pick = legout_match_labels[(current_lidx + 1) % len(legout_match_labels)]
                 with col_lpick:
-                    legout_pick_label = st.selectbox(
-                        "Chart a match", legout_match_labels, index=st.session_state.legout_chart_idx, key="legout_chart_pick"
-                    )
-                    new_lidx = legout_match_labels.index(legout_pick_label)
-                    if new_lidx != st.session_state.legout_chart_idx:
-                        st.session_state.legout_chart_idx = new_lidx
+                    legout_pick_label = st.selectbox("Chart a match", legout_match_labels, key="legout_chart_pick")
                 with col_lperiod:
                     legout_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="legout_chart_period")
 
-                legout_row = legout_results.iloc[st.session_state.legout_chart_idx]
+                legout_row = legout_results.iloc[legout_match_labels.index(legout_pick_label)]
                 legout_pick = legout_row["symbol"]
                 if legout_pick in history:
                     st.plotly_chart(
