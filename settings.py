@@ -148,11 +148,35 @@ class BacktestSettings:
     risk_pct_per_trade: float = 1.0
     commission_per_share: float = 0.0
     slippage_pct: float = 0.1
+    # Initial stop placement. "adr_multiple": entry_price -/+ ADR% * stop_adr_multiple
+    # (the original heuristic). "low_of_signal_day": the signal day's actual low
+    # (high for shorts), capped so it's never more than stop_adr_multiple ADRs away --
+    # this is how Qullamaggie himself describes setting stops ("set stop at low of
+    # day... stop should be no more than the ATR").
+    stop_mode: str = "low_of_signal_day"
     stop_adr_multiple: float = 1.0
     partial_profit_r_multiple: float = 1.0
     partial_profit_fraction: float = 0.5
-    trail_ema_period: int = 20
+    # Fallback partial-profit trigger by time elapsed, independent of whether
+    # the R-multiple target has been hit -- "sell 1/3 to 1/2 of the position
+    # after 3-5 days, then move the stop to break even." Whichever of the R
+    # target or this day count is hit first takes the partial. 0 disables.
+    partial_profit_max_days: int = 5
+    # After the partial is taken, move the stop on the remainder to breakeven
+    # (entry price) -- "take 10-30% profit after 1-3 days, then move stop-loss
+    # to breakeven."
+    move_stop_to_breakeven_after_partial: bool = True
+    trail_ema_period: int = 10  # Qullamaggie: "use 10-day SMA as trailing stop"
+    trail_ma_type: str = "sma"  # "sma" | "ema"
     max_positions: int = 10
+    # Never risk more than this % of equity on one position ("don't put more
+    # than 20% of your account into any one share"), regardless of what the
+    # risk-based share count would otherwise imply.
+    max_position_pct_of_equity: float = 20.0
+    # Skip a signal if the signal day's own range already exceeds this many
+    # ADRs -- an anti-chase filter ("if price change on day is more than the
+    # ATR, skip it"). Set to 0 to disable.
+    avoid_chase_adr_multiple: float = 1.5
     entry_delay_days: int = 1
 
 

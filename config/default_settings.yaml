@@ -111,9 +111,17 @@ backtest:
   risk_pct_per_trade: 1.0           # % of equity risked per trade (position sizing)
   commission_per_share: 0.0
   slippage_pct: 0.1
-  stop_adr_multiple: 1.0            # initial stop distance = ADR * this multiple
+  # Qullamaggie's own stated rule: stop at the low of the signal day, capped at
+  # stop_adr_multiple ADRs. Set to "adr_multiple" for the older pure-ADR heuristic.
+  stop_mode: low_of_signal_day
+  stop_adr_multiple: 1.0            # initial stop distance cap = ADR * this multiple
   partial_profit_r_multiple: 1.0    # scale out first tranche at this many R
   partial_profit_fraction: 0.5      # fraction of position sold at the partial target
-  trail_ema_period: 20              # trail remainder using a close below this EMA
+  partial_profit_max_days: 5        # OR after this many days held, whichever comes first (0 = disabled)
+  move_stop_to_breakeven_after_partial: true  # "move stop-loss to breakeven" after the partial
+  trail_ema_period: 10              # Qullamaggie: "use 10-day SMA as trailing stop"
+  trail_ma_type: sma                # "sma" | "ema"
   max_positions: 10                 # portfolio-level concurrent position cap
+  max_position_pct_of_equity: 20.0  # "don't put more than 20% of your account into any one share"
+  avoid_chase_adr_multiple: 1.5     # skip entry if the signal day's range > this many ADRs (0 = disabled)
   entry_delay_days: 1               # enter next bar's open after the signal

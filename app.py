@@ -33,6 +33,7 @@ from scanner import (
     scan_signals_over_history,
     top_movers_by_timeframe,
 )
+from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
 from pattern_diagrams import get_pattern_diagram
 from settings import Settings
 from setups import SETUP_REGISTRY
@@ -415,11 +416,39 @@ with tab_designer:
 
             st.markdown("**Backtest mechanics**")
             bt = settings.backtest
+            bt.stop_mode = st.selectbox(
+                "Stop placement", ["low_of_signal_day", "adr_multiple"], index=0 if bt.stop_mode == "low_of_signal_day" else 1,
+                format_func=lambda v: "Low of signal day (Qullamaggie's rule, capped at the ADR)" if v == "low_of_signal_day" else "Pure ADR multiple from entry",
+                key="d_bt_stopmode",
+            )
             bt.risk_pct_per_trade = st.slider("Risk % per trade", 0.1, 5.0, float(bt.risk_pct_per_trade), 0.1, key="d_bt_risk")
-            bt.stop_adr_multiple = st.slider("Stop distance (x ADR)", 0.25, 3.0, float(bt.stop_adr_multiple), 0.25, key="d_bt_stop")
+            bt.stop_adr_multiple = st.slider(
+                "Stop distance cap (x ADR)", 0.25, 3.0, float(bt.stop_adr_multiple), 0.25, key="d_bt_stop",
+                help="With 'Low of signal day', this is a cap -- the stop never ends up farther than this many ADRs away.",
+            )
+            bt.max_position_pct_of_equity = st.slider(
+                "Max position size (% of equity)", 5.0, 100.0, float(bt.max_position_pct_of_equity), 5.0, key="d_bt_maxpos_pct",
+                help="\"Don't put more than 20% of your account into any one share.\"",
+            )
+            bt.avoid_chase_adr_multiple = st.slider(
+                "Anti-chase: skip if signal day's range > this many ADRs (0 = off)", 0.0, 4.0,
+                float(bt.avoid_chase_adr_multiple), 0.25, key="d_bt_chase",
+            )
             bt.partial_profit_r_multiple = st.slider("Partial profit target (R)", 0.5, 5.0, float(bt.partial_profit_r_multiple), 0.5, key="d_bt_ptarget")
             bt.partial_profit_fraction = st.slider("Partial profit fraction", 0.0, 1.0, float(bt.partial_profit_fraction), 0.05, key="d_bt_pfrac")
-            bt.trail_ema_period = st.slider("Trailing EMA period", 5, 50, int(bt.trail_ema_period), key="d_bt_trail")
+            bt.partial_profit_max_days = st.slider(
+                "OR take partial after this many days held, if sooner (0 = off)", 0, 20, int(bt.partial_profit_max_days),
+                key="d_bt_pdays",
+                help="\"Sell 1/3 to 1/2 of the position after 3-5 days, then move the stop to break even\" -- "
+                "fires the partial even if the R-target above hasn't been hit yet.",
+            )
+            bt.move_stop_to_breakeven_after_partial = st.checkbox(
+                "Move stop to breakeven after partial", value=bt.move_stop_to_breakeven_after_partial, key="d_bt_breakeven",
+            )
+            bt.trail_ma_type = st.selectbox(
+                "Trailing MA type", ["sma", "ema"], index=0 if bt.trail_ma_type == "sma" else 1, key="d_bt_matype",
+            )
+            bt.trail_ema_period = st.slider("Trailing MA period", 5, 50, int(bt.trail_ema_period), key="d_bt_trail")
             bt.max_positions = st.slider("Max concurrent positions", 1, 30, int(bt.max_positions), key="d_bt_maxpos")
 
         with col_results:
@@ -676,6 +705,70 @@ with tab_scanner:
             else:
                 st.plotly_chart(plot_symbol(browse_df, browse_symbol), use_container_width=True, key="browse_chart")
                 st.caption("No pattern match for this symbol in the last scan (or you haven't run one yet).")
+
+        with st.expander("🧮 Legout scans (TC2000-style, from legout.github.io)", expanded=False):
+            st.caption(
+                "24 of legout.github.io's ~32 published TC2000 scan formulas, translated into pandas and "
+                "applied to whatever's loaded above. These are fixed threshold rules (not tunable in the "
+                "Designer tab) -- run whichever you want, on demand."
+            )
+            legout_keys = list(LEGOUT_SCANS.keys())
+            legout_labels = {k: v["label"] for k, v in LEGOUT_SCANS.items()}
+            default_selected = [k for k, v in LEGOUT_SCANS.items() if v.get("default_on")]
+            legout_selected = st.multiselect(
+                "Scans to run",
+                legout_keys,
+                default=default_selected,
+                format_func=lambda k: legout_labels[k],
+                key="legout_selected",
+            )
+            legout_scope = st.radio(
+                "Scope",
+                ["Momentum leaders only (faster)", "Everything loaded"],
+                horizontal=True,
+                key="legout_scope",
+            )
+            if st.button("Run Legout Scans", key="legout_run_btn"):
+                legout_history = history
+                if legout_scope.startswith("Momentum"):
+                    shortlist = momentum_shortlist(
+                        history, settings.universe.momentum_timeframes_days, settings.universe.momentum_top_pct
+                    )
+                    legout_history = {s: history[s] for s in shortlist if s in history}
+                from indicators import build_close_panel, compute_rs_rating_panel
+
+                close_panel = build_close_panel(legout_history)
+                rs_rating_panel = compute_rs_rating_panel(
+                    close_panel, settings.rs_rating.lookback_periods, settings.rs_rating.period_weights
+                )
+                rs_panel = {sym: rs_rating_panel[sym] for sym in rs_rating_panel.columns}
+                st.session_state.legout_results = run_legout_scans(legout_history, legout_selected, rs_panel)
+
+            legout_results = st.session_state.get("legout_results")
+            if legout_results is None:
+                st.info("Pick some scans above and click 'Run Legout Scans'.")
+            elif legout_results.empty:
+                st.warning("No matches -- try 'Everything loaded' scope, or different scans.")
+            else:
+                st.caption(f"{len(legout_results)} match(es) across {legout_results['symbol'].nunique()} symbol(s).")
+                st.dataframe(legout_results, use_container_width=True, height=300)
+                legout_pick = st.selectbox(
+                    "Chart a match", legout_results["symbol"].unique().tolist(), key="legout_chart_pick"
+                )
+                if legout_pick and legout_pick in history:
+                    st.plotly_chart(
+                        plot_symbol(history[legout_pick], legout_pick),
+                        use_container_width=True,
+                        key="legout_chart",
+                    )
+
+            with st.expander("Formulas used (and what's skipped)"):
+                st.markdown("**Implemented:**")
+                for key, spec in LEGOUT_SCANS.items():
+                    st.markdown(f"- **{spec['label']}**: `{spec['formula']}`")
+                st.markdown("**Not implemented, with reasons:**")
+                for name, reason in SKIPPED_SCANS.items():
+                    st.markdown(f"- **{name}**: {reason}")
 
 
 # --------------------------------------------------------------------------

@@ -1,12 +1,21 @@
 """Event-driven, bar-based (daily) portfolio backtest engine.
 
-Mechanics, matching how these setups are actually traded rather than a naive
-close-to-close backtest:
+Mechanics, matching how these setups are actually traded (and, where stated,
+Qullamaggie's own documented rules) rather than a naive close-to-close backtest:
   - Entry on the next bar's open after a signal day (`entry_delay_days`).
-  - Initial stop sized in ADR multiples (`stop_adr_multiple`), which also
-    drives position size via a fixed risk-% per trade.
-  - Optional partial profit-take at an R-multiple, trailing the remainder
-    off a close below (long) / above (short) an EMA.
+  - Anti-chase filter: skip a signal if its own day's range already exceeds
+    `avoid_chase_adr_multiple` ADRs ("if price change on day is more than the
+    ATR, skip it").
+  - Initial stop: either the signal day's actual low, capped at
+    `stop_adr_multiple` ADRs ("stop_mode='low_of_signal_day'`, Qullamaggie's
+    stated rule), or a pure ADR-multiple from entry (`'adr_multiple'`) --
+    which also drives position size via a fixed risk-% per trade, itself
+    capped at `max_position_pct_of_equity` of the account on any one position.
+  - Optional partial profit-take at an R-multiple, OR after
+    `partial_profit_max_days` bars held (whichever comes first) -- "sell 1/3
+    to 1/2 after 3-5 days." If taken, the stop can move to breakeven
+    (`move_stop_to_breakeven_after_partial`), then the remainder trails off a
+    close below (long) / above (short) an SMA or EMA.
   - A portfolio-level `max_positions` cap shared across all symbols.
 """
 from __future__ import annotations
@@ -39,10 +48,14 @@ class Trade:
     exit_reason: Optional[str] = None
     pnl: Optional[float] = None
     r_multiple: Optional[float] = None
+    initial_stop_price: float = None  # the *original* stop, for R-multiple -- stop_price may later move to breakeven
+    bars_held: int = 0  # bars elapsed since entry_date; drives the time-based partial-profit fallback
 
     def __post_init__(self):
         if self.shares == 0.0:
             self.shares = self.initial_shares
+        if self.initial_stop_price is None:
+            self.initial_stop_price = self.stop_price
 
 
 @dataclass
@@ -79,15 +92,35 @@ class BacktestResult:
         return pd.DataFrame(rows)
 
 
-def _prepare_signal_frame(df: pd.DataFrame, trail_ema_period: int) -> pd.DataFrame:
+def _prepare_signal_frame(df: pd.DataFrame, trail_period: int, trail_ma_type: str = "sma") -> pd.DataFrame:
     d = df.copy()
-    d["trail_ema"] = d["close"].ewm(span=trail_ema_period, adjust=False).mean()
+    if trail_ma_type == "ema":
+        d["trail_ema"] = d["close"].ewm(span=trail_period, adjust=False).mean()
+    else:
+        d["trail_ema"] = d["close"].rolling(trail_period).mean()
     if "adr_pct" not in d.columns:
         if "adr_pct_20" in d.columns:
             d["adr_pct"] = d["adr_pct_20"]
         else:
             d["adr_pct"] = (d["high"] / d["low"] - 1.0).rolling(20).mean() * 100.0
     return d
+
+
+def _apply_partial(trade: Trade, price: float, side: str, bt: BacktestSettings, cash: float) -> float:
+    """Sell/cover `partial_profit_fraction` of the position at `price`, and --
+    if configured -- move the stop to breakeven. Returns the updated cash."""
+    partial_shares = trade.shares * bt.partial_profit_fraction
+    if side == "long":
+        cash += partial_shares * price * (1 - bt.slippage_pct / 100.0)
+        trade.partial_pnl += (price - trade.entry_price) * partial_shares
+    else:
+        cash -= partial_shares * price * (1 + bt.slippage_pct / 100.0)
+        trade.partial_pnl += (trade.entry_price - price) * partial_shares
+    trade.shares -= partial_shares
+    trade.partial_taken = True
+    if bt.move_stop_to_breakeven_after_partial:
+        trade.stop_price = max(trade.stop_price, trade.entry_price) if side == "long" else min(trade.stop_price, trade.entry_price)
+    return cash
 
 
 def run_backtest(
@@ -98,7 +131,11 @@ def run_backtest(
     """`signals`: {symbol: DataFrame} as produced by
     scanner.scan_signals_over_history -- must have a boolean `match` column
     plus open/high/low/close/volume (and ideally adr_pct)."""
-    prepared = {sym: _prepare_signal_frame(df, bt.trail_ema_period) for sym, df in signals.items() if not df.empty}
+    prepared = {
+        sym: _prepare_signal_frame(df, bt.trail_ema_period, bt.trail_ma_type)
+        for sym, df in signals.items()
+        if not df.empty
+    }
 
     if not prepared:
         return BacktestResult(trades=[], equity_curve=pd.Series(dtype=float), side=side)
@@ -130,32 +167,36 @@ def run_backtest(
             if date not in df.index:
                 continue
             bar = df.loc[date]
+            trade.bars_held += 1
 
             exit_price = None
             exit_reason = None
+
+            # Partial profit fires at the R-multiple target, OR after
+            # partial_profit_max_days bars held -- whichever comes first
+            # ("sell 1/3 to 1/2 after 3-5 days").
+            time_partial_due = (
+                not trade.partial_taken
+                and bt.partial_profit_max_days > 0
+                and trade.bars_held >= bt.partial_profit_max_days
+            )
 
             if side == "long":
                 if bar["low"] <= trade.stop_price:
                     exit_price, exit_reason = trade.stop_price, "stop"
                 elif not trade.partial_taken and trade.target_price and bar["high"] >= trade.target_price:
-                    partial_shares = trade.shares * bt.partial_profit_fraction
-                    proceeds = partial_shares * trade.target_price * (1 - bt.slippage_pct / 100.0)
-                    cash += proceeds
-                    trade.partial_pnl += (trade.target_price - trade.entry_price) * partial_shares
-                    trade.shares -= partial_shares
-                    trade.partial_taken = True
+                    cash = _apply_partial(trade, trade.target_price, side, bt, cash)
+                elif time_partial_due:
+                    cash = _apply_partial(trade, bar["close"], side, bt, cash)
                 elif bar["close"] < bar["trail_ema"]:
                     exit_price, exit_reason = bar["close"], "trail"
             else:  # short
                 if bar["high"] >= trade.stop_price:
                     exit_price, exit_reason = trade.stop_price, "stop"
                 elif not trade.partial_taken and trade.target_price and bar["low"] <= trade.target_price:
-                    # buy back (cover) the partial tranche at the target price
-                    partial_shares = trade.shares * bt.partial_profit_fraction
-                    cash -= partial_shares * trade.target_price * (1 + bt.slippage_pct / 100.0)
-                    trade.partial_pnl += (trade.entry_price - trade.target_price) * partial_shares
-                    trade.shares -= partial_shares
-                    trade.partial_taken = True
+                    cash = _apply_partial(trade, trade.target_price, side, bt, cash)
+                elif time_partial_due:
+                    cash = _apply_partial(trade, bar["close"], side, bt, cash)
                 elif bar["close"] > bar["trail_ema"]:
                     exit_price, exit_reason = bar["close"], "trail"
 
@@ -173,7 +214,7 @@ def run_backtest(
                 total_pnl -= commission
                 cash -= commission
 
-                stop_distance = abs(trade.entry_price - trade.stop_price)
+                stop_distance = abs(trade.entry_price - trade.initial_stop_price)
                 trade.exit_date = date
                 trade.exit_price = exit_price
                 trade.exit_reason = exit_reason
@@ -207,10 +248,38 @@ def run_backtest(
                 continue
             entry_price = raw_entry_price * (1 + bt.slippage_pct / 100.0 * sign)
 
-            adr_pct = df.loc[signal_date, "adr_pct"]
+            signal_bar = df.loc[signal_date]
+            adr_pct = signal_bar["adr_pct"]
             if not np.isfinite(adr_pct) or adr_pct <= 0:
                 continue
-            stop_distance = entry_price * (adr_pct / 100.0) * bt.stop_adr_multiple
+
+            # Anti-chase filter: skip if the signal day's own range already
+            # blew past a normal day for this stock -- "if price change on
+            # day is more than the ATR, skip it."
+            if bt.avoid_chase_adr_multiple > 0:
+                signal_range_pct = (signal_bar["high"] / signal_bar["low"] - 1.0) * 100.0
+                if np.isfinite(signal_range_pct) and signal_range_pct > adr_pct * bt.avoid_chase_adr_multiple:
+                    continue
+
+            adr_stop_distance = entry_price * (adr_pct / 100.0) * bt.stop_adr_multiple
+            if adr_stop_distance <= 0:
+                continue
+
+            if bt.stop_mode == "low_of_signal_day":
+                # Stop at the signal day's actual low (high for shorts),
+                # capped so it's never more than stop_adr_multiple ADRs away
+                # ("stop should be no more than the ATR").
+                if side == "long":
+                    raw_stop_distance = entry_price - signal_bar["low"]
+                else:
+                    raw_stop_distance = signal_bar["high"] - entry_price
+                if not np.isfinite(raw_stop_distance) or raw_stop_distance <= 0:
+                    stop_distance = adr_stop_distance
+                else:
+                    stop_distance = min(raw_stop_distance, adr_stop_distance)
+            else:
+                stop_distance = adr_stop_distance
+
             if stop_distance <= 0:
                 continue
 
@@ -218,6 +287,11 @@ def run_backtest(
             shares = risk_amount / stop_distance
             affordable_shares = cash / entry_price if entry_price > 0 else 0
             shares = max(min(shares, affordable_shares), 0.0)
+            # Never risk more than max_position_pct_of_equity of the account
+            # on one position, regardless of what risk-based sizing implies.
+            if bt.max_position_pct_of_equity > 0 and entry_price > 0:
+                max_shares_by_position_cap = (equity * bt.max_position_pct_of_equity / 100.0) / entry_price
+                shares = min(shares, max_shares_by_position_cap)
             if shares <= 0:
                 continue
 
@@ -256,7 +330,7 @@ def run_backtest(
             proceeds = trade.shares * last_px * (1 + bt.slippage_pct / 100.0)
             cash -= proceeds
             total_pnl = trade.partial_pnl + (trade.entry_price - last_px) * trade.shares
-        stop_distance = abs(trade.entry_price - trade.stop_price)
+        stop_distance = abs(trade.entry_price - trade.initial_stop_price)
         trade.exit_date = df.index[-1]
         trade.exit_price = last_px
         trade.exit_reason = "end_of_data"
