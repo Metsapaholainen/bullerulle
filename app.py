@@ -752,15 +752,47 @@ with tab_scanner:
             else:
                 st.caption(f"{len(legout_results)} match(es) across {legout_results['symbol'].nunique()} symbol(s).")
                 st.dataframe(legout_results, use_container_width=True, height=300)
-                legout_pick = st.selectbox(
-                    "Chart a match", legout_results["symbol"].unique().tolist(), key="legout_chart_pick"
+
+                legout_match_labels = [
+                    f"{r['symbol']} -- {r['scan']} ({pd.Timestamp(r['date']).date()})"
+                    for _, r in legout_results.iterrows()
+                ]
+                if "legout_chart_idx" not in st.session_state:
+                    st.session_state.legout_chart_idx = 0
+                st.session_state.legout_chart_idx = max(
+                    0, min(st.session_state.legout_chart_idx, len(legout_match_labels) - 1)
                 )
-                if legout_pick and legout_pick in history:
+
+                col_lprev, col_lpick, col_lnext, col_lperiod = st.columns([1, 3, 1, 2])
+                with col_lprev:
+                    if st.button("⬅ Prev", key="legout_prev"):
+                        st.session_state.legout_chart_idx = (st.session_state.legout_chart_idx - 1) % len(legout_match_labels)
+                with col_lnext:
+                    if st.button("Next ➡", key="legout_next"):
+                        st.session_state.legout_chart_idx = (st.session_state.legout_chart_idx + 1) % len(legout_match_labels)
+                with col_lpick:
+                    legout_pick_label = st.selectbox(
+                        "Chart a match", legout_match_labels, index=st.session_state.legout_chart_idx, key="legout_chart_pick"
+                    )
+                    new_lidx = legout_match_labels.index(legout_pick_label)
+                    if new_lidx != st.session_state.legout_chart_idx:
+                        st.session_state.legout_chart_idx = new_lidx
+                with col_lperiod:
+                    legout_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="legout_chart_period")
+
+                legout_row = legout_results.iloc[st.session_state.legout_chart_idx]
+                legout_pick = legout_row["symbol"]
+                if legout_pick in history:
                     st.plotly_chart(
-                        plot_symbol(history[legout_pick], legout_pick),
+                        plot_symbol(
+                            slice_for_period(history[legout_pick], legout_period),
+                            legout_pick,
+                            marker_date=legout_row["date"],
+                        ),
                         use_container_width=True,
                         key="legout_chart",
                     )
+                    st.caption(f"Green dashed line = the day **{legout_row['scan']}** matched.")
 
             with st.expander("Formulas used (and what's skipped)"):
                 st.markdown("**Implemented:**")
