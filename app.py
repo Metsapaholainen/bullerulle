@@ -34,7 +34,7 @@ from scanner import (
     top_movers_by_timeframe,
 )
 from data.fundamentals_cache import get_earnings_dates, get_fundamentals_bulk
-from fundamentals_classifier import classify_lynch, days_to_earnings, LYNCH_CATEGORIES
+from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
 from pattern_diagrams import get_pattern_diagram
 from settings import Settings
@@ -43,6 +43,13 @@ from setups.explanations import PATTERN_EXPLANATIONS
 from ui_helpers import render_stat_badges, style_results_dataframe
 
 LIVE_MODE_MAX_SYMBOLS = 30
+# Auto-fetching fundamentals costs ~3 FMP calls/symbol -- fine for a
+# momentum-prefiltered shortlist (tens of symbols), but scanning the whole
+# loaded universe unfiltered could mean hundreds of symbols x 3 calls each.
+# Above this size, skip the automatic fetch rather than risk a multi-minute
+# Run Scan (the standalone Fundamentals panel is still available for a
+# smaller custom list).
+MAX_FUNDAMENTALS_AUTO_FETCH = 200
 LABEL_TO_SETUP_KEY = {spec["label"]: key for key, spec in SETUP_REGISTRY.items()}
 
 st.set_page_config(page_title="Qullamaggie Scanner", layout="wide")
@@ -678,8 +685,28 @@ with tab_scanner:
                 except Exception as exc:
                     st.warning(f"Earnings-date lookup failed ({exc}) -- running without the earnings-avoidance filter.")
 
+            scan_fundamentals = None
+            if len(scan_history) <= MAX_FUNDAMENTALS_AUTO_FETCH:
+                try:
+                    fund_client = get_client()
+                    fund_progress = st.progress(0.0, text="Fetching fundamentals for scan candidates...")
+                    scan_fundamentals = get_fundamentals_bulk(
+                        fund_client, list(scan_history.keys()),
+                        on_progress=lambda i, n, s: fund_progress.progress(i / n, text=f"Fundamentals: {s} ({i}/{n})"),
+                    )
+                    fund_progress.empty()
+                except Exception as exc:
+                    st.warning(f"Fundamentals fetch failed ({exc}) -- scanning without growth-based scoring/columns.")
+            else:
+                st.caption(
+                    f"Skipping automatic fundamentals fetch for {len(scan_history)} symbols "
+                    f"(cap: {MAX_FUNDAMENTALS_AUTO_FETCH}) -- pre-filter to momentum leaders first for growth-based "
+                    "scoring, or use the Fundamentals panel below for a smaller custom list."
+                )
+
             st.session_state.last_scan = run_scan(
                 settings, scan_history, as_of=str(as_of), auto_detect=auto_detect,
+                fundamentals=scan_fundamentals,
                 earnings_dates=scan_earnings_dates, avoid_earnings_window=avoid_earnings,
                 avoid_earnings_days=int(avoid_earnings_days),
             )
@@ -825,7 +852,47 @@ with tab_scanner:
                     close_panel, settings.rs_rating.lookback_periods, settings.rs_rating.period_weights
                 )
                 rs_panel = {sym: rs_rating_panel[sym] for sym in rs_rating_panel.columns}
-                st.session_state.legout_results = run_legout_scans(legout_history, legout_selected, rs_panel)
+                legout_matches = run_legout_scans(legout_history, legout_selected, rs_panel)
+
+                # Same fundamentals/earnings-avoidance treatment as the main
+                # Run Scan -- reuses the checkbox/setting defined above,
+                # applied only to the (typically small) set of matched
+                # symbols rather than the whole scanned scope, so this stays
+                # cheap regardless of "Everything loaded" vs "Momentum leaders".
+                if not legout_matches.empty:
+                    legout_match_symbols = legout_matches["symbol"].unique().tolist()
+                    if len(legout_match_symbols) <= MAX_FUNDAMENTALS_AUTO_FETCH:
+                        try:
+                            legout_fund_client = get_client()
+                            legout_fundamentals = get_fundamentals_bulk(legout_fund_client, legout_match_symbols)
+                            legout_matches["revenue_growth_pct"] = legout_matches["symbol"].map(
+                                lambda s: legout_fundamentals.get(s, {}).get("revenue_growth_pct")
+                            )
+                            legout_matches["eps_growth_pct"] = legout_matches["symbol"].map(
+                                lambda s: legout_fundamentals.get(s, {}).get("eps_growth_pct")
+                            )
+                            legout_matches["lynch_category"] = legout_matches["symbol"].map(
+                                lambda s: LYNCH_CATEGORIES[classify_lynch(legout_fundamentals.get(s, {}))]
+                            )
+                            if avoid_earnings:
+                                legout_earnings_dates = get_earnings_dates(
+                                    legout_fund_client, legout_match_symbols, as_of=str(as_of)
+                                )
+                                legout_matches["days_to_earnings"] = legout_matches.apply(
+                                    lambda r: days_to_earnings(r["symbol"], legout_earnings_dates, r["date"]), axis=1
+                                )
+                                legout_matches = filter_earnings_avoidance(
+                                    legout_matches, legout_earnings_dates, str(as_of), int(avoid_earnings_days)
+                                )
+                        except Exception as exc:
+                            st.warning(f"Fundamentals enrichment failed ({exc}) -- showing raw matches only.")
+                    else:
+                        st.caption(
+                            f"Skipping fundamentals enrichment for {len(legout_match_symbols)} matched symbols "
+                            f"(cap: {MAX_FUNDAMENTALS_AUTO_FETCH})."
+                        )
+
+                st.session_state.legout_results = legout_matches
 
             legout_results = st.session_state.get("legout_results")
             if legout_results is None:
