@@ -1031,7 +1031,7 @@ with tab_scanner:
             )
 
         min_adr_pct = st.number_input(
-            "📈 Minimum ADR% (20-day avg daily range)", min_value=0.0, max_value=50.0, value=0.0, step=0.5,
+            "📈 Minimum ADR% (20-day avg daily range)", min_value=0.0, max_value=50.0, value=4.0, step=0.5,
             key="scanner_min_adr_pct",
             help="Drops any match with less tradeable daily range than this, regardless of which setup found "
             "it -- e.g. set to 4.0 to hide anything with less than 4% average daily range. 0 disables the filter.",
