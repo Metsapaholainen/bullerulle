@@ -4,18 +4,24 @@ shown in the app next to scan matches so a match isn't just a row of numbers.
 
 PATTERN_EXPLANATIONS = {
     "breakout": (
-        "Qullamaggie Breakout. A stock already made a big move (30-100%+), then paused to "
-        "consolidate for a few weeks in a tight range while 'surfing' its 10/20-day moving "
-        "average -- a sign strong hands are holding, not dumping. A breakout to new highs on "
+        "Qullamaggie Breakout. A stock already made a big move -- a genuine net advance, not just "
+        "a wide/choppy range -- then paused to consolidate for a few weeks in a tight, orderly "
+        "range with higher lows, while 'surfing' its 10/20-day moving averages, which must "
+        "themselves be sloping upward (not just sat above by price). A breakout to new highs on "
         "above-average volume means demand is stepping back in and the stock is resuming its "
         "prior trend. This is a momentum-continuation trade, not a reversal."
     ),
     "episodic_pivot": (
         "Episodic Pivot. A sudden, large gap up (often on an earnings surprise, guidance raise, "
         "or major news) on unusually heavy volume, in a stock that had been quiet or overlooked "
-        "beforehand. The gap reflects a sharp, sudden re-rating of the business by the market -- "
-        "these can be the start of a large new trend, but are also more news-driven and volatile "
-        "than a technical breakout, so risk control matters even more here."
+        "beforehand. Big growth numbers (EPS/revenue) are required whenever fundamentals data is "
+        "available for the symbol, not just a scoring bonus, and a genuine earnings beat vs. "
+        "analyst estimates adds further to the score when that data is available. The gap reflects "
+        "a sharp, sudden re-rating of the business by the market -- these can be the start of a "
+        "large new trend, but are also more news-driven and volatile than a technical breakout, so "
+        "risk control matters even more here. Note: this scanner only ever sees end-of-day bars, so "
+        "it can't verify the stricter 'gap confirmed in the first 5-30 minutes' intraday timing -- "
+        "that confirmation is left to the trader."
     ),
     "parabolic_short": (
         "Parabolic Short (extension/reversal). A stock has run up so far, so fast, that it's "

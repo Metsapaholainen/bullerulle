@@ -48,6 +48,37 @@ def scan(df: pd.DataFrame, settings: BreakoutSettings, rs_rating: pd.Series = No
     prior_low = df["low"].shift(settings.max_consolidation_days + 1).rolling(settings.prior_move_lookback_days).min()
     prior_move_pct = (prior_high - prior_low) / prior_low * 100.0
 
+    # Genuine net advance over that same prior-move window -- prior_move_pct
+    # above is a high-low RANGE %, which a choppy or net-flat/down stock
+    # could still satisfy. This checks it was actually "a big move higher".
+    prior_window_end_close = df["close"].shift(settings.max_consolidation_days + 1)
+    prior_window_start_close = df["close"].shift(settings.max_consolidation_days + settings.prior_move_lookback_days)
+    prior_net_move_pct = (prior_window_end_close - prior_window_start_close) / prior_window_start_close * 100.0
+
+    # "Surf the rising 10-/20-day moving averages" -- being above the EMA
+    # (below) isn't the same as the EMA itself trending up. Both ends of the
+    # slope are shifted by 1 day (excluding today), same as base_high/
+    # recent_high/prior_high above -- otherwise, on the actual breakout day,
+    # today's own price surge would feed into ema_fast_col/ema_slow_col and
+    # trivially satisfy "rising" regardless of whether the base leading up
+    # to it was really trending up.
+    ema_fast_slope_pct = (
+        (df[ema_fast_col].shift(1) - df[ema_fast_col].shift(settings.ema_slope_lookback_days + 1))
+        / df[ema_fast_col].shift(settings.ema_slope_lookback_days + 1) * 100.0
+    )
+    ema_slow_slope_pct = (
+        (df[ema_slow_col].shift(1) - df[ema_slow_col].shift(settings.ema_slope_lookback_days + 1))
+        / df[ema_slow_col].shift(settings.ema_slope_lookback_days + 1) * 100.0
+    )
+
+    # "An orderly pullback ... with higher lows": split the base window into
+    # an older first half and a more recent second half (recent_low above IS
+    # that second half already) and require the second half's low to hold at
+    # or above the first half's low. The two halves are contiguous and
+    # non-overlapping, tiling the same span as base_high/base_low exactly.
+    first_half_days = max(1, settings.max_consolidation_days - settings.min_consolidation_days)
+    first_half_low = df["low"].shift(settings.min_consolidation_days + 1).rolling(first_half_days).min()
+
     # Resistance = the base's high, not counting today (same window as base_high).
     resistance = base_high
 
@@ -74,6 +105,14 @@ def scan(df: pd.DataFrame, settings: BreakoutSettings, rs_rating: pd.Series = No
         shape_cond &= df["close"] > df[ema_fast_col]
     if settings.require_above_ema20:
         shape_cond &= df["close"] > df[ema_slow_col]
+    if settings.require_rising_ema10:
+        shape_cond &= ema_fast_slope_pct > settings.min_ema_slope_pct
+    if settings.require_rising_ema20:
+        shape_cond &= ema_slow_slope_pct > settings.min_ema_slope_pct
+    if settings.require_higher_lows:
+        shape_cond &= recent_low >= first_half_low * (1.0 - settings.higher_lows_tolerance_pct / 100.0)
+    if settings.require_net_prior_advance:
+        shape_cond &= prior_net_move_pct >= settings.min_prior_net_advance_pct
 
     # Trigger conditions -- the actual breakout: crossing resistance on volume.
     cond = shape_cond & (df["close"] > resistance) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
@@ -88,6 +127,10 @@ def scan(df: pd.DataFrame, settings: BreakoutSettings, rs_rating: pd.Series = No
     out["volume_ratio"] = df[vol_ratio_col]
     out["rs_rating"] = rs
     out["resistance"] = resistance
+    out["prior_net_move_pct"] = prior_net_move_pct
+    out["ema_fast_slope_pct"] = ema_fast_slope_pct
+    out["ema_slow_slope_pct"] = ema_slow_slope_pct
+    out["first_half_low"] = first_half_low
     out["score"] = (
         (df[adr_col].clip(lower=0) / max(settings.min_adr_pct, 1e-9))
         + (rs.clip(lower=0) / 100.0) * 2.0

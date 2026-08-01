@@ -751,6 +751,17 @@ with tab_designer:
                 s.min_rs_rating = st.slider("Min RS rating", 1, 99, int(s.min_rs_rating), key=f"d_bo_rs_{st.session_state.settings_version}")
                 s.require_above_ema10 = st.checkbox("Require close > EMA10", value=s.require_above_ema10, key=f"d_bo_ema10_{st.session_state.settings_version}")
                 s.require_above_ema20 = st.checkbox("Require close > EMA20", value=s.require_above_ema20, key=f"d_bo_ema20_{st.session_state.settings_version}")
+                st.markdown("**\"Surf the rising moving averages\"**")
+                s.require_rising_ema10 = st.checkbox("Require EMA10 sloping up", value=s.require_rising_ema10, key=f"d_bo_risingema10_{st.session_state.settings_version}")
+                s.require_rising_ema20 = st.checkbox("Require EMA20 sloping up", value=s.require_rising_ema20, key=f"d_bo_risingema20_{st.session_state.settings_version}")
+                s.ema_slope_lookback_days = st.slider("EMA slope lookback (days)", 2, 20, int(s.ema_slope_lookback_days), key=f"d_bo_slopelb_{st.session_state.settings_version}")
+                s.min_ema_slope_pct = st.slider("Min EMA slope % over lookback", -5.0, 20.0, float(s.min_ema_slope_pct), 0.5, key=f"d_bo_slopemin_{st.session_state.settings_version}")
+                st.markdown("**\"Orderly pullback with higher lows\"**")
+                s.require_higher_lows = st.checkbox("Require higher lows in base", value=s.require_higher_lows, key=f"d_bo_higherlows_{st.session_state.settings_version}")
+                s.higher_lows_tolerance_pct = st.slider("Higher-lows tolerance %", 0.0, 15.0, float(s.higher_lows_tolerance_pct), 0.5, key=f"d_bo_hltol_{st.session_state.settings_version}")
+                st.markdown("**\"A big move higher\" (not just a wide/choppy range)**")
+                s.require_net_prior_advance = st.checkbox("Require genuine net advance", value=s.require_net_prior_advance, key=f"d_bo_netadv_{st.session_state.settings_version}")
+                s.min_prior_net_advance_pct = st.slider("Min prior net advance %", 0.0, 100.0, float(s.min_prior_net_advance_pct), 5.0, key=f"d_bo_netadvmin_{st.session_state.settings_version}")
             elif setup_choice == "episodic_pivot":
                 s.min_gap_pct = st.slider("Min gap %", 1.0, 50.0, float(s.min_gap_pct), 1.0, key=f"d_ep_gap_{st.session_state.settings_version}")
                 s.min_volume_ratio = st.slider("Min volume ratio", 0.5, 10.0, float(s.min_volume_ratio), 0.1, key=f"d_ep_vol_{st.session_state.settings_version}")
@@ -780,6 +791,13 @@ with tab_designer:
                 )
                 s.require_growth_floor = st.checkbox(
                     "Require growth floor as a hard filter", value=s.require_growth_floor, key=f"d_ep_require_growth_{st.session_state.settings_version}"
+                )
+                st.markdown("**Earnings beat** (\"a significant beat to analyst expectations\")")
+                s.min_eps_beat_pct_for_bonus = st.slider(
+                    "EPS beat % for bonus tier", 0.0, 100.0, float(s.min_eps_beat_pct_for_bonus), 5.0, key=f"d_ep_beatbonus_{st.session_state.settings_version}"
+                )
+                s.require_eps_beat = st.checkbox(
+                    "Require EPS beat as a hard filter (when data available)", value=s.require_eps_beat, key=f"d_ep_requirebeat_{st.session_state.settings_version}"
                 )
             elif setup_choice == "parabolic_short":
                 s.min_extension_adr_multiple = st.slider("Min extension (x ADR)", 0.5, 10.0, float(s.min_extension_adr_multiple), 0.1, key=f"d_ps_ext_{st.session_state.settings_version}")
@@ -864,9 +882,10 @@ with tab_designer:
                 )
                 ep_override_choice = st.selectbox(
                     "EP stop override", ep_override_options, index=ep_override_index, key=f"d_bt_ep_override_{st.session_state.settings_version}",
-                    help="EP's stop should exclude the gap (\"calculate stop from the low of the opening candle, "
-                    "don't include the gap\") -- the whole-day low used elsewhere is gap-contaminated for EP "
-                    "specifically. Only affects Episodic Pivot backtests.",
+                    help="Per the source article, EP's stop rule is worded identically to Breakout's -- \"the stop "
+                    "is at the lows of the day\" -- so the default (use Stop placement above, i.e. the signal "
+                    "day's whole-day low) already matches it. This is an optional alternative to experiment with, "
+                    "not a correction. Only affects Episodic Pivot backtests.",
                 )
                 bt.ep_stop_mode_override = None if ep_override_choice == "(use Stop placement above)" else ep_override_choice
 

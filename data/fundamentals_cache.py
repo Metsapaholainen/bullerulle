@@ -51,6 +51,7 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
     out = {
         "revenue_growth_pct": None, "eps_growth_pct": None, "float_shares": None, "free_float_pct": None,
         "market_cap": None, "company_name": None, "sector": None,
+        "eps_beat_pct": None, "eps_beat_date": None,
     }
 
     try:
@@ -90,12 +91,30 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
     except FMPError:
         out["insider_acquired_disposed_ratio"] = None
 
+    try:
+        # Most recent REPORTED quarter only -- rows for future/not-yet-
+        # reported dates have epsActual/epsEstimated as None and must be
+        # skipped; don't assume the API returns them in date order.
+        rows = client.earnings_surprise(symbol, limit=4)
+        reported = sorted(
+            (r for r in rows if r.get("epsActual") is not None and r.get("epsEstimated")),
+            key=lambda r: r.get("date", ""), reverse=True,
+        )
+        if reported:
+            latest = reported[0]
+            eps_actual, eps_estimated = latest["epsActual"], latest["epsEstimated"]
+            out["eps_beat_pct"] = round((eps_actual - eps_estimated) / abs(eps_estimated) * 100.0, 2)
+            out["eps_beat_date"] = latest.get("date")
+    except FMPError:
+        pass
+
     return out
 
 
 REQUIRED_FIELDS = {
     "revenue_growth_pct", "eps_growth_pct", "float_shares", "free_float_pct",
     "market_cap", "company_name", "sector", "insider_acquired_disposed_ratio",
+    "eps_beat_pct", "eps_beat_date",
 }
 
 

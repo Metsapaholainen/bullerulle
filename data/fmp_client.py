@@ -25,6 +25,7 @@ ENDPOINTS = {
     "income_statement_growth": "/income-statement-growth",
     "shares_float": "/shares-float",
     "earnings_calendar": "/earnings-calendar",
+    "earnings_company": "/earnings",
     "insider_trade_statistics": "/insider-trading/statistics",
 }
 
@@ -150,6 +151,16 @@ class FMPClient:
         Keep `from_date`/`to_date` narrow -- even a ~6-week window returns
         hundreds of KB across the whole market."""
         data = self._get(ENDPOINTS["earnings_calendar"], params={"from": from_date, "to": to_date})
+        return data if isinstance(data, list) else []
+
+    def earnings_surprise(self, symbol: str, limit: int = 4) -> list:
+        """Wraps /earnings (per-symbol) -- actual-vs-estimate EPS/revenue per
+        report date, e.g. {"date": ..., "epsActual": 1.87, "epsEstimated":
+        1.76, "revenueActual": ..., "revenueEstimated": ...}. Rows for
+        future/not-yet-reported dates have epsActual/revenueActual as None --
+        callers must filter those out. Best-effort: pre-revenue or
+        no-coverage symbols may return an empty list."""
+        data = self._get(ENDPOINTS["earnings_company"], params={"symbol": symbol, "limit": limit})
         return data if isinstance(data, list) else []
 
     def insider_trade_statistics(self, symbol: str) -> list:

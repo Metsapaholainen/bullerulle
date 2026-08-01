@@ -59,6 +59,23 @@ class BreakoutSettings:
     breakout_volume_ratio_min: float = 1.5
     volume_avg_period: int = 50
     min_rs_rating: float = 90.0
+    # "Surf the rising 10- and 20-day moving averages" -- being *above* the
+    # EMA (require_above_ema10/20 above) isn't the same as the EMA itself
+    # actually sloping upward. These check the EMA's own trend.
+    require_rising_ema10: bool = True
+    require_rising_ema20: bool = True
+    ema_slope_lookback_days: int = 5
+    min_ema_slope_pct: float = 0.0
+    # "An orderly pullback and consolidation with higher lows" -- distinct
+    # from max_consolidation_range_pct's tightness check, which says nothing
+    # about whether the base's lows are actually ascending vs. choppy.
+    require_higher_lows: bool = True
+    higher_lows_tolerance_pct: float = 0.0
+    # The prior move must be a genuine net advance ("a big move HIGHER"),
+    # not just a wide high-low range (prior_move_min_pct/max_pct above),
+    # which a choppy or even net-down stock could otherwise satisfy.
+    require_net_prior_advance: bool = True
+    min_prior_net_advance_pct: float = 0.0
 
 
 @dataclass
@@ -85,7 +102,16 @@ class EpisodicPivotSettings:
     # digits works really well too."
     min_growth_pct_floor: float = 25.0
     ideal_growth_pct: float = 100.0
-    require_growth_floor: bool = False
+    # "There HAS to be big growth numbers" -- the article treats growth as a
+    # requirement, not just a nice-to-have, so this now defaults on. Still
+    # safe with no fundamentals fetched: the filter only activates when
+    # growth_pct is not None (see setups/episodic_pivot.py).
+    require_growth_floor: bool = True
+    # "A significant beat to analyst expectations" -- scored as a bonus on
+    # top of growth quality; optionally a hard filter too (off by default,
+    # since earnings-beat data coverage is spotty for smaller/newer names).
+    min_eps_beat_pct_for_bonus: float = 20.0
+    require_eps_beat: bool = False
 
 
 @dataclass
@@ -198,11 +224,13 @@ class BacktestSettings:
     # Swing) -- caps share count independent of the risk-based sizing
     # above. 0 disables.
     max_position_pct_of_avg_volume: float = 1.0
-    # Episodic Pivot's stop should exclude the gap ("calculate stop from
-    # the low of the opening candle, don't include the gap") -- the
-    # whole-day low used by stop_mode="low_of_signal_day" elsewhere is
-    # gap-contaminated for EP specifically. None = use `stop_mode` as-is;
-    # set to e.g. "adr_multiple" to override it for EP backtests only.
+    # Per the source article, EP's stop rule is worded identically to
+    # Breakout's: "the stop is at the lows of the day" -- no documented
+    # carve-out for the gap or the opening candle specifically. The default
+    # (None, i.e. `stop_mode` as-is -- the signal day's whole-day low,
+    # ADR-capped) already matches this. This override exists only as an
+    # optional alternative to experiment with in backtests, not because the
+    # default is wrong; set to e.g. "adr_multiple" to try it.
     ep_stop_mode_override: Optional[str] = None
 
 

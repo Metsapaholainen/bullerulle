@@ -146,11 +146,14 @@ def run_backtest(
     plus open/high/low/close/volume (and ideally adr_pct).
 
     `setup_name`, if passed as "episodic_pivot", activates
-    `bt.ep_stop_mode_override` (if set) for these trades only -- EP's stop
-    should exclude the gap ("calculate stop from the low of the opening
-    candle"), which the whole-day-low `stop_mode="low_of_signal_day"`
-    doesn't do. Every other setup, and EP with no override configured,
-    behaves exactly as before."""
+    `bt.ep_stop_mode_override` (if set) for these trades only. Per the
+    source article, EP's stop rule is worded identically to Breakout's --
+    "the stop is at the lows of the day" -- so the default (override=None,
+    i.e. plain `stop_mode="low_of_signal_day"`, the signal day's whole-day
+    low, ADR-capped) already matches it. The override exists only as an
+    optional alternative to experiment with, not because the default is
+    wrong. Every other setup, and EP with no override configured, behaves
+    exactly as before."""
     effective_stop_mode = (
         bt.ep_stop_mode_override if (setup_name == "episodic_pivot" and bt.ep_stop_mode_override) else bt.stop_mode
     )

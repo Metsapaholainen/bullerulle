@@ -1,5 +1,11 @@
 """Qullamaggie 'Episodic Pivot' setup: a big gap up on a catalyst (earnings,
 news) with heavy volume, out of a previously quiet/neglected base.
+
+Gap/volume conditions here are evaluated on daily EOD bars only -- the
+article's "10%+ gap on big volume in the first 5-30 minutes" can't be
+checked intraday since this codebase has no intraday data source (confirmed:
+data/fmp_client.py and data/cache.py only fetch/cache daily bars). This is a
+deliberate, acknowledged limitation, not an oversight.
 """
 from __future__ import annotations
 
@@ -71,7 +77,25 @@ def scan(
     if settings.require_growth_floor and growth_pct is not None:
         cond &= growth_pct >= settings.min_growth_pct_floor
 
-    growth_bonus = 2.0 if growth_tier == "5-star" else (1.0 if growth_tier == "floor-met" else 0.0)
+    # "A significant beat to analyst expectations" -- a single most-recent-
+    # quarter figure (data/fundamentals_cache.py), same "most recent known"
+    # simplification as growth_pct above. Never hard-fails the scan unless
+    # require_eps_beat is explicitly turned on (off by default: beat-data
+    # coverage is spotty for smaller/newer names).
+    eps_beat_pct = fundamentals.get("eps_beat_pct") if fundamentals else None
+    beat_qualifies = eps_beat_pct is not None and eps_beat_pct >= settings.min_eps_beat_pct_for_bonus
+    if settings.require_eps_beat and eps_beat_pct is not None:
+        cond &= eps_beat_pct >= settings.min_eps_beat_pct_for_bonus
+
+    if growth_tier == "5-star" and beat_qualifies:
+        growth_bonus = 3.0
+    elif growth_tier == "5-star":
+        growth_bonus = 2.0
+    elif growth_tier == "floor-met":
+        growth_bonus = 1.0 + (0.5 if beat_qualifies else 0.0)
+    else:
+        growth_bonus = 0.5 if beat_qualifies else 0.0
+
     base_score = df["gap_pct"].clip(lower=0) / 10.0 + df[vol_ratio_col].clip(lower=0) + growth_bonus
     score = base_score.where(~had_prior_ep, base_score / 2.0)
 
@@ -84,5 +108,6 @@ def scan(
     out["had_prior_ep"] = had_prior_ep
     out["growth_pct"] = growth_pct
     out["growth_tier"] = growth_tier
+    out["eps_beat_pct"] = eps_beat_pct
     out["score"] = score
     return out
