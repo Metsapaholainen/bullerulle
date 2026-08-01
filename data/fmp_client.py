@@ -21,6 +21,7 @@ ENDPOINTS = {
     "company_screener": "/company-screener",
     "historical_price_eod_full": "/historical-price-eod/full",
     "quote": "/quote",
+    "profile": "/profile",
     "income_statement_growth": "/income-statement-growth",
     "shares_float": "/shares-float",
     "earnings_calendar": "/earnings-calendar",
@@ -117,6 +118,15 @@ class FMPClient:
             return []
         data = self._get(ENDPOINTS["quote"], params={"symbol": ",".join(symbols)})
         return data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+
+    def profile(self, symbol: str) -> dict:
+        """Wraps /profile -- one company per symbol, carrying `companyName`,
+        `sector`, and `marketCap` in a single call (used by the fundamentals
+        cache instead of /quote so sector comes along for free)."""
+        data = self._get(ENDPOINTS["profile"], params={"symbol": symbol})
+        if isinstance(data, list) and data:
+            return data[0]
+        return data if isinstance(data, dict) else {}
 
     def income_statement_growth(self, symbol: str, period: str = "quarter", limit: int = 1) -> list:
         """Wraps /income-statement-growth -- fields of interest are

@@ -31,6 +31,14 @@ GITHUB_BRANCH = "data-store"
 GITHUB_API_BASE = "https://api.github.com"
 _TIMEOUT = 10
 
+# Process-lifetime caches so a save doesn't re-verify the branch and
+# re-fetch the current file's sha on every single click -- that was costing
+# 3 sequential GitHub API round-trips per write (branch check + get-sha +
+# commit) when at most the commit itself is actually necessary once this
+# process has already confirmed the branch exists and knows the last sha.
+_branch_ready = False
+_sha_cache: dict = {}
+
 
 def _resolve_github_token(explicit: Optional[str] = None) -> Optional[str]:
     """Explicit arg > Streamlit Cloud secrets > local .env/os.environ -- same
@@ -86,7 +94,11 @@ def _branch_exists(token: str) -> bool:
 
 
 def _ensure_branch_exists(token: str) -> None:
+    global _branch_ready
+    if _branch_ready:
+        return
     if _branch_exists(token):
+        _branch_ready = True
         return
     # Branch doesn't exist yet -- create it pointing at master's current commit.
     resp = requests.get(
@@ -102,6 +114,7 @@ def _ensure_branch_exists(token: str) -> None:
     )
     if create_resp.status_code not in (201, 422):  # 422 = ref already exists (race), fine
         create_resp.raise_for_status()
+    _branch_ready = True
 
 
 def _get_file(token: str, path: str):
@@ -127,8 +140,10 @@ def read_file(path: str, token: Optional[str] = None) -> Optional[str]:
         return _read_local(path)
     try:
         _ensure_branch_exists(resolved)
-        content, _ = _get_file(resolved, path)
+        content, sha = _get_file(resolved, path)
         if content is not None:
+            if sha:
+                _sha_cache[path] = sha
             return content
         return _read_local(path)  # not on GitHub yet -- e.g. before the very first write
     except Exception:
@@ -140,26 +155,43 @@ def write_file(path: str, content: str, message: str, token: Optional[str] = Non
     token is configured. On any failure (or no token), writes to a local
     file instead -- so an edit is never silently lost, though a local-only
     write won't survive a Streamlit Cloud restart, which is surfaced as a
-    warning so that's never mistaken for durable storage."""
+    warning so that's never mistaken for durable storage.
+
+    Skips the branch-exists check and the current-file-sha lookup once this
+    process already knows them (`_branch_ready`/`_sha_cache`) -- a save used
+    to cost 3 sequential GitHub API round-trips (branch check, get-sha,
+    commit); after the first successful write for a given path it's just the
+    commit itself. If the cached sha turns out to be stale (someone edited
+    the file directly on GitHub, or another process wrote first), the PUT
+    comes back 409/422 and this refetches the real sha once and retries."""
     resolved = _resolve_github_token(token)
     if not resolved:
         _write_local(path, content)
         return
     try:
         _ensure_branch_exists(resolved)
-        _, sha = _get_file(resolved, path)
-        body = {
-            "message": message,
-            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-            "branch": GITHUB_BRANCH,
-        }
-        if sha:
-            body["sha"] = sha
-        resp = requests.put(
-            f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/{path}",
-            headers=_headers(resolved), timeout=_TIMEOUT + 5, json=body,
-        )
-        resp.raise_for_status()
+        sha = _sha_cache.get(path)
+        for attempt in range(2):
+            body = {
+                "message": message,
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "branch": GITHUB_BRANCH,
+            }
+            if sha:
+                body["sha"] = sha
+            resp = requests.put(
+                f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/{path}",
+                headers=_headers(resolved), timeout=_TIMEOUT + 5, json=body,
+            )
+            if resp.status_code in (409, 422) and attempt == 0:
+                _, sha = _get_file(resolved, path)
+                continue
+            resp.raise_for_status()
+            new_sha = resp.json().get("content", {}).get("sha")
+            if new_sha:
+                _sha_cache[path] = new_sha
+            return
     except Exception as exc:
+        _sha_cache.pop(path, None)
         _write_local(path, content)
         _warn(f"Couldn't save to GitHub ({exc}) -- saved locally instead, which won't survive a Cloud restart.")

@@ -50,7 +50,7 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
     returns whatever else succeeded rather than failing the whole fetch."""
     out = {
         "revenue_growth_pct": None, "eps_growth_pct": None, "float_shares": None, "free_float_pct": None,
-        "market_cap": None, "company_name": None,
+        "market_cap": None, "company_name": None, "sector": None,
     }
 
     try:
@@ -65,13 +65,14 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
         pass
 
     try:
-        # /quote already carries market cap + full company name alongside
-        # price -- this is the same endpoint Live Mode uses for a fresh
-        # price, so no new FMP endpoint is needed for this.
-        quotes = client.get_quotes([symbol])
-        if quotes:
-            out["market_cap"] = quotes[0].get("marketCap")
-            out["company_name"] = quotes[0].get("name")
+        # /profile carries market cap, full company name, and sector in one
+        # call -- replaces the earlier /quote-based lookup (which had name
+        # + market cap but no sector).
+        profile = client.profile(symbol)
+        if profile:
+            out["market_cap"] = profile.get("marketCap")
+            out["company_name"] = profile.get("companyName")
+            out["sector"] = profile.get("sector")
     except FMPError:
         pass
 
@@ -92,16 +93,30 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
     return out
 
 
+REQUIRED_FIELDS = {
+    "revenue_growth_pct", "eps_growth_pct", "float_shares", "free_float_pct",
+    "market_cap", "company_name", "sector", "insider_acquired_disposed_ratio",
+}
+
+
 def get_fundamentals(
     client: FMPClient, symbol: str, ttl_seconds: float = DEFAULT_TTL_SECONDS, force_refresh: bool = False
 ) -> dict:
     """Returns a dict with revenue_growth_pct/eps_growth_pct/float_shares/
-    free_float_pct/insider_acquired_disposed_ratio/market_cap/company_name --
-    any field can be None if that particular FMP call failed or the data
-    wasn't available."""
+    free_float_pct/insider_acquired_disposed_ratio/market_cap/company_name/
+    sector -- any field can be None if that particular FMP call failed or
+    the data wasn't available.
+
+    A cached entry missing one of REQUIRED_FIELDS entirely (as opposed to
+    present-but-None) is treated as stale regardless of its TTL and
+    refetched -- guards against a cache file written by an older version of
+    this module (e.g. before `sector` was added) silently serving an
+    incomplete result forever, since the age check alone wouldn't catch it."""
     cached = None if force_refresh else _load_cached(symbol)
     if cached is not None and (time.time() - cached.get("fetched_at", 0)) < ttl_seconds:
-        return cached["data"]
+        cached_data = cached.get("data", {})
+        if REQUIRED_FIELDS <= set(cached_data.keys()):
+            return cached_data
 
     data = _fetch_fundamentals(client, symbol)
     _save_cache(symbol, data)

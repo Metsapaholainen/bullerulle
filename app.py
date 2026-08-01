@@ -99,6 +99,13 @@ if "watchlist" not in st.session_state:
     # once here so the "+ Watchlist" button next to any chart and the
     # dedicated Watchlist tab always see the same in-session list.
     st.session_state.watchlist = load_general_watchlist()
+if "paper_trades" not in st.session_state:
+    # Loaded once here (rather than only inside the Paper Trading tab body)
+    # so the "+ Paper Trading" button next to any chart can append to it
+    # regardless of which tab happens to run first in a given script pass.
+    st.session_state.paper_trades = pt_load_trades()
+if "paper_rules" not in st.session_state:
+    st.session_state.paper_rules = pt_load_rules()
 
 # Apply anything queued by the Parameter Finder's "Copy to Backtest &
 # Optimizer" button *before* any widget below is instantiated -- Streamlit
@@ -135,8 +142,49 @@ def render_add_to_watchlist_button(symbol: str, key_suffix: str) -> None:
             st.success(f"Added {symbol} to your watchlist.")
 
 
+def render_add_to_paper_trading_button(symbol: str, decision_date, key_suffix: str, setup_tag: str = None) -> None:
+    """A small "+ Paper Trading" button dropped next to any chart -- logs a
+    paper trade for the currently-viewed symbol, defaulting the decision
+    date to whatever this chart's own signal date is (or the most recent
+    loaded bar if there isn't one, i.e. "I'm looking at this right now").
+    Deduped the same way the Paper Trading tab's own form is (by symbol +
+    decision date) so clicking twice doesn't log a duplicate. `key_suffix`
+    just needs to be unique per call site."""
+    if st.button("+ Paper Trading", key=f"add_paper_{key_suffix}"):
+        if decision_date is None:
+            st.warning(f"{symbol} isn't loaded -- can't log a decision date.")
+            return
+        entry_date_str = pd.Timestamp(decision_date).strftime("%Y-%m-%d")
+        already_logged = any(
+            t["symbol"] == symbol and t["decision_date"] == entry_date_str for t in st.session_state.paper_trades
+        )
+        if already_logged:
+            st.info(f"{symbol} on {entry_date_str} is already logged in Paper Trading.")
+        else:
+            st.session_state.paper_trades.append(
+                {"symbol": symbol, "decision_date": entry_date_str, "setup_tag": setup_tag or "", "notes": ""}
+            )
+            pt_save_trades(st.session_state.paper_trades)
+            st.success(f"Logged {symbol} ({entry_date_str}) to Paper Trading.")
+
+
+def render_add_to_sell_alerts_button(symbol: str, key_suffix: str, ma_period: int = 10) -> None:
+    """A small "+ Sell Alert" button -- adds the currently-viewed symbol to
+    the Sell Alerts watchlist (close-below-`ma_period`-day-MA rule), deduped
+    by symbol against whatever's already there. `key_suffix` just needs to
+    be unique per call site."""
+    if st.button("+ Sell Alert", key=f"add_sellalert_{key_suffix}"):
+        existing_symbols = {e["symbol"] for e in st.session_state.sell_watchlist}
+        if symbol in existing_symbols:
+            st.info(f"{symbol} is already on your Sell Alerts watchlist.")
+        else:
+            st.session_state.sell_watchlist.append({"symbol": symbol, "ma_period": ma_period})
+            save_watchlist(st.session_state.sell_watchlist)
+            st.success(f"Added {symbol} to Sell Alerts ({ma_period}-day MA).")
+
+
 def _lightweight_fundamentals(symbol: str) -> dict:
-    """Cached market_cap/company_name/revenue_growth_pct/eps_growth_pct
+    """Cached market_cap/company_name/sector/revenue_growth_pct/eps_growth_pct
     lookup for chart call sites with no scan-result row already carrying
     these fields (Browse all charts' no-match branch, Paper Trading). A
     network hiccup here should never block the chart itself from
@@ -148,6 +196,7 @@ def _lightweight_fundamentals(symbol: str) -> dict:
         return {}
     return {
         "market_cap": fd.get("market_cap"), "company_name": fd.get("company_name"),
+        "sector": fd.get("sector"),
         "revenue_growth_pct": fd.get("revenue_growth_pct"), "eps_growth_pct": fd.get("eps_growth_pct"),
     }
 
@@ -229,6 +278,12 @@ with st.sidebar:
             )
             progress.empty()
             st.success(f"Loaded {len(st.session_state.history)} symbols.")
+            # Charts themselves aren't warmed here -- plot_symbol() isn't
+            # defined yet at this point in the script (this sidebar section
+            # runs before the "Chart helper" section further down), so a
+            # flag is set instead and the actual warm-up runs once
+            # plot_symbol exists, right before the tab bodies below.
+            st.session_state._warm_charts_pending = True
         except Exception as exc:
             progress.empty()
             st.error(f"Data load failed: {exc}")
@@ -427,7 +482,7 @@ def plot_symbol(
     entry_date=None, entry_price=None, stop_price=None, target_price=None,
     partial_date=None, partial_price=None,
     exit_date=None, exit_price=None, exit_reason=None, r_multiple=None,
-    market_cap=None, company_name=None, revenue_growth_pct=None, eps_growth_pct=None,
+    market_cap=None, company_name=None, revenue_growth_pct=None, eps_growth_pct=None, sector=None,
 ):
     # Cached: this is a pure function of its arguments (no st.* calls, no
     # hidden global state besides static module-level constants), and it's
@@ -451,6 +506,8 @@ def plot_symbol(
     # a "worth trading" threshold -- a high ADR is a good sign for this
     # trading style, not a risk flag, unlike most other volatility metrics.
     chart_title = f"{symbol} -- {company_name}" if company_name else symbol
+    if sector:
+        chart_title += f" ({sector})"
     if not df.empty:
         chart_adr_pct = compute_adr_pct_at(df, df.index[-1], lookback=20)
         detail_parts = []
@@ -626,6 +683,31 @@ def plot_symbol(
         height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=50, b=10),
     )
     return fig
+
+
+if st.session_state.pop("_warm_charts_pending", False) and history:
+    # Warms plot_symbol()'s cache for every just-loaded symbol's default
+    # "Browse all charts" view (no scan match yet at this point -- Run Scan
+    # hasn't necessarily happened) right after data loads, rather than only
+    # after a scan completes -- so switching stocks in Browse all
+    # charts/the Watchlist tab is instant even before running a scan. Runs
+    # once per load (the flag is popped so a later rerun doesn't repeat it).
+    _warm_symbols = [s for s, df in history.items() if not df.empty]
+    if _warm_symbols:
+        _warm_progress = st.progress(0.0, text="Pre-building charts for instant browsing...")
+        for _wi, _wsym in enumerate(_warm_symbols):
+            try:
+                plot_symbol(
+                    resolve_chart_df(history[_wsym], AUTO_CHART_PERIOD, None, None, settings), _wsym,
+                    **_lightweight_fundamentals(_wsym),
+                )
+            except Exception:
+                pass
+            _warm_progress.progress(
+                (_wi + 1) / len(_warm_symbols), text=f"Pre-building charts... ({_wi + 1}/{len(_warm_symbols)})"
+            )
+        _warm_progress.empty()
+        st.caption(f"Pre-built {len(_warm_symbols)} chart(s) for instant browsing.")
 
 
 # --------------------------------------------------------------------------
@@ -900,11 +982,16 @@ with tab_scanner:
                         plot_symbol(
                             history[pick_approach], pick_approach, marker_date=arow["date"],
                             setup_key=a_setup_key, settings=settings, row=arow, side=arow.get("side", "long"),
+                            **_lightweight_fundamentals(pick_approach),
                         ),
                         use_container_width=True,
                         key="approach_chart",
                     )
-                    render_add_to_watchlist_button(pick_approach, "approach")
+                    col_approach_wl, col_approach_pt = st.columns(2)
+                    with col_approach_wl:
+                        render_add_to_watchlist_button(pick_approach, "approach")
+                    with col_approach_pt:
+                        render_add_to_paper_trading_button(pick_approach, arow["date"], "approach", setup_tag=arow["setup"])
             elif approaching_df is not None:
                 st.caption("Nothing within that distance right now -- try widening the % above.")
 
@@ -942,6 +1029,13 @@ with tab_scanner:
             avoid_earnings_days = st.number_input(
                 "Days", min_value=0, max_value=14, value=3, key="scanner_avoid_earnings_days", disabled=not avoid_earnings
             )
+
+        min_adr_pct = st.number_input(
+            "📈 Minimum ADR% (20-day avg daily range)", min_value=0.0, max_value=50.0, value=0.0, step=0.5,
+            key="scanner_min_adr_pct",
+            help="Drops any match with less tradeable daily range than this, regardless of which setup found "
+            "it -- e.g. set to 4.0 to hide anything with less than 4% average daily range. 0 disables the filter.",
+        )
 
         if st.button("Run Scan"):
             scan_history = history
@@ -982,6 +1076,7 @@ with tab_scanner:
                 settings, scan_history, as_of=str(as_of), auto_detect=auto_detect,
                 fundamentals=scan_fundamentals,
                 earnings_dates=scan_earnings_dates, avoid_earnings_window=avoid_earnings,
+                min_adr_pct=float(min_adr_pct),
                 avoid_earnings_days=int(avoid_earnings_days),
             )
             st.session_state.last_scan = new_scan_results
@@ -1078,12 +1173,17 @@ with tab_scanner:
                         resolve_chart_df(history[pick], pick_period, row, picked_setup_key, settings), pick,
                         marker_date=row["date"], setup_key=picked_setup_key, settings=settings, row=row, side=picked_side,
                         market_cap=row.get("market_cap"), company_name=row.get("company_name"),
+                        sector=row.get("sector"),
                         revenue_growth_pct=row.get("revenue_growth_pct"), eps_growth_pct=row.get("eps_growth_pct"),
                     ),
                     use_container_width=True,
                     key="scanner_match_chart",
                 )
-                render_add_to_watchlist_button(pick, "scanner_match")
+                col_scanner_wl, col_scanner_pt = st.columns(2)
+                with col_scanner_wl:
+                    render_add_to_watchlist_button(pick, "scanner_match")
+                with col_scanner_pt:
+                    render_add_to_paper_trading_button(pick, row["date"], "scanner_match", setup_tag=row["setup"])
                 st.caption(
                     "Shaded blue/orange region = the window the detector looked at; yellow dotted line = "
                     "breakout/resistance level; green star = signal day; cyan diamond = entry; red dashed = "
@@ -1165,19 +1265,32 @@ with tab_scanner:
                         setup_key=browse_setup_key, settings=settings, row=browse_match,
                         side=browse_match.get("side", "long"),
                         market_cap=browse_match.get("market_cap"), company_name=browse_match.get("company_name"),
+                        sector=browse_match.get("sector"),
                         revenue_growth_pct=browse_match.get("revenue_growth_pct"), eps_growth_pct=browse_match.get("eps_growth_pct"),
                     ),
                     use_container_width=True,
                     key="browse_chart",
                 )
-                render_add_to_watchlist_button(browse_symbol, "browse")
+                col_browse_wl, col_browse_pt = st.columns(2)
+                with col_browse_wl:
+                    render_add_to_watchlist_button(browse_symbol, "browse")
+                with col_browse_pt:
+                    render_add_to_paper_trading_button(
+                        browse_symbol, browse_match["date"], "browse", setup_tag=browse_match["setup"]
+                    )
                 st.success(f"This matched **{browse_match['setup']}** in the last scan.")
             else:
                 browse_fund = _lightweight_fundamentals(browse_symbol)
                 st.plotly_chart(
                     plot_symbol(browse_df, browse_symbol, **browse_fund), use_container_width=True, key="browse_chart"
                 )
-                render_add_to_watchlist_button(browse_symbol, "browse_nomatch")
+                col_browse_nm_wl, col_browse_nm_pt = st.columns(2)
+                with col_browse_nm_wl:
+                    render_add_to_watchlist_button(browse_symbol, "browse_nomatch")
+                with col_browse_nm_pt:
+                    render_add_to_paper_trading_button(
+                        browse_symbol, history[browse_symbol].index[-1], "browse_nomatch"
+                    )
                 st.caption("No pattern match for this symbol in the last scan (or you haven't run one yet).")
 
         with st.expander("🧮 Legout scans (TC2000-style, from legout.github.io)", expanded=False):
@@ -1348,7 +1461,13 @@ with tab_scanner:
                         use_container_width=True,
                         key="legout_chart",
                     )
-                    render_add_to_watchlist_button(legout_pick, "legout")
+                    col_legout_wl, col_legout_pt = st.columns(2)
+                    with col_legout_wl:
+                        render_add_to_watchlist_button(legout_pick, "legout")
+                    with col_legout_pt:
+                        render_add_to_paper_trading_button(
+                            legout_pick, legout_row["date"], "legout", setup_tag=legout_row["scan"]
+                        )
                     st.caption(f"Green dashed line = the day **{legout_row['scan']}** matched.")
 
             with st.expander("Formulas used (and what's skipped)"):
@@ -1418,6 +1537,7 @@ with tab_scanner:
                                 "symbol": sym,
                                 "company_name": fd.get("company_name"),
                                 "market_cap": fd.get("market_cap"),
+                                "sector": fd.get("sector"),
                                 "revenue_growth_pct": fd.get("revenue_growth_pct"),
                                 "eps_growth_pct": fd.get("eps_growth_pct"),
                                 "float_shares": fd.get("float_shares"),
@@ -1443,11 +1563,16 @@ with tab_scanner:
                         plot_symbol(
                             history[fund_pick], fund_pick,
                             market_cap=fund_row.get("market_cap"), company_name=fund_row.get("company_name"),
+                            sector=fund_row.get("sector"),
                             revenue_growth_pct=fund_row.get("revenue_growth_pct"), eps_growth_pct=fund_row.get("eps_growth_pct"),
                         ),
                         use_container_width=True, key="fund_chart",
                     )
-                    render_add_to_watchlist_button(fund_pick, "fund")
+                    col_fund_wl, col_fund_pt = st.columns(2)
+                    with col_fund_wl:
+                        render_add_to_watchlist_button(fund_pick, "fund")
+                    with col_fund_pt:
+                        render_add_to_paper_trading_button(fund_pick, history[fund_pick].index[-1], "fund")
 
             with st.expander("What do these columns mean?"):
                 st.markdown(
@@ -1632,7 +1757,13 @@ with tab_finder:
                 use_container_width=True,
                 key="param_finder_chart",
             )
-            render_add_to_watchlist_button(pf_symbol, "param_finder")
+            col_pf_wl, col_pf_pt = st.columns(2)
+            with col_pf_wl:
+                render_add_to_watchlist_button(pf_symbol, "param_finder")
+            with col_pf_pt:
+                render_add_to_paper_trading_button(
+                    pf_symbol, marker_date, "param_finder", setup_tag=SETUP_REGISTRY[pf_setup]["label"]
+                )
             st.caption(
                 "Shaded region = the window the detector looked at; dashed yellow line = its "
                 "breakout/resistance level; green line = the target date."
@@ -1979,11 +2110,6 @@ with tab_paper:
         "every automated setup elsewhere in this app."
     )
 
-    if "paper_trades" not in st.session_state:
-        st.session_state.paper_trades = pt_load_trades()
-    if "paper_rules" not in st.session_state:
-        st.session_state.paper_rules = pt_load_rules()
-
     with st.expander("Paper trading rules (independent of the Designer tab)", expanded=False):
         st.caption(
             "These stay fixed regardless of what you tune in Designer -> Backtest mechanics, so your journal's "
@@ -2267,16 +2393,31 @@ with tab_watchlist:
                     setup_key=watchlist_setup_key, settings=settings, row=watchlist_match,
                     side=watchlist_match.get("side", "long"),
                     market_cap=watchlist_match.get("market_cap"), company_name=watchlist_match.get("company_name"),
+                    sector=watchlist_match.get("sector"),
                     revenue_growth_pct=watchlist_match.get("revenue_growth_pct"), eps_growth_pct=watchlist_match.get("eps_growth_pct"),
                 ),
                 use_container_width=True,
                 key="watchlist_chart",
             )
+            col_wlt_pt, col_wlt_sa = st.columns(2)
+            with col_wlt_pt:
+                render_add_to_paper_trading_button(
+                    watchlist_symbol, watchlist_match["date"], "watchlist_tab", setup_tag=watchlist_match["setup"]
+                )
+            with col_wlt_sa:
+                render_add_to_sell_alerts_button(watchlist_symbol, "watchlist_tab")
         else:
             st.plotly_chart(
                 plot_symbol(watchlist_df, watchlist_symbol, **_lightweight_fundamentals(watchlist_symbol)),
                 use_container_width=True, key="watchlist_chart",
             )
+            col_wlt_nm_pt, col_wlt_nm_sa = st.columns(2)
+            with col_wlt_nm_pt:
+                render_add_to_paper_trading_button(
+                    watchlist_symbol, history[watchlist_symbol].index[-1], "watchlist_tab_nomatch"
+                )
+            with col_wlt_nm_sa:
+                render_add_to_sell_alerts_button(watchlist_symbol, "watchlist_tab_nomatch")
 
 
 # --------------------------------------------------------------------------

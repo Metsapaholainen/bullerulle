@@ -368,6 +368,7 @@ def run_scan(
     earnings_dates: Optional[dict] = None,
     avoid_earnings_window: bool = True,
     avoid_earnings_days: int = 3,
+    min_adr_pct: float = 0.0,
 ) -> pd.DataFrame:
     """Given already-fetched history, run every enabled setup for the most
     recent (or `as_of`) date per symbol and return one ranked DataFrame.
@@ -390,7 +391,10 @@ def run_scan(
     `avoid_earnings_window` is True and earnings_dates was supplied, rows
     within `avoid_earnings_days` of an earnings date are dropped --
     "avoid buying 3-days before earnings" (Qullamaggie's Laws of Swing),
-    applied across every setup, not just EP."""
+    applied across every setup, not just EP. `min_adr_pct` drops any row
+    whose 20-day ADR% at the signal date is below the threshold -- a global
+    tradeability filter applied across every setup, independent of
+    whatever any individual setup's own settings require."""
     setup_names = setup_names or enabled_setup_names(settings)
     if not setup_names or not history:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
@@ -447,6 +451,7 @@ def run_scan(
                     "side": spec["side"],
                     "date": eval_date,
                     "close": enriched.loc[eval_date, "close"],
+                    "adr_pct": enriched.loc[eval_date, "adr_pct_20"],
                 }
                 record.update({k: v for k, v in best_row.items() if k != "match"})
                 # Carry the actual window-length values that produced this
@@ -482,6 +487,7 @@ def run_scan(
         )
         result_df["market_cap"] = result_df["symbol"].map(lambda s: fundamentals.get(s, {}).get("market_cap"))
         result_df["company_name"] = result_df["symbol"].map(lambda s: fundamentals.get(s, {}).get("company_name"))
+        result_df["sector"] = result_df["symbol"].map(lambda s: fundamentals.get(s, {}).get("sector"))
         result_df["lynch_category"] = result_df["symbol"].map(
             lambda s: LYNCH_CATEGORIES[classify_lynch(fundamentals.get(s, {}))]
         )
@@ -493,6 +499,9 @@ def run_scan(
         )
         if avoid_earnings_window:
             result_df = filter_earnings_avoidance(result_df, earnings_dates, as_of_ts, avoid_earnings_days)
+
+    if min_adr_pct > 0:
+        result_df = result_df[result_df["adr_pct"] >= min_adr_pct]
 
     if result_df.empty:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
