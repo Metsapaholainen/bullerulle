@@ -361,9 +361,30 @@ def plot_symbol(
             x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name=symbol
         )
     )
+
+    # ADR% (average daily range, the same trailing-20-day formula used to
+    # size stops elsewhere in this app) as of the last bar currently shown --
+    # shown right in the chart title so it's visible next to every chart
+    # without touching each of this function's call sites individually.
+    chart_title = symbol
+    if not df.empty:
+        chart_adr_pct = compute_adr_pct_at(df, df.index[-1], lookback=20)
+        if chart_adr_pct is not None:
+            chart_title = f"{symbol} -- ADR%: {chart_adr_pct:.1f}%"
     for period, color in ((10, "orange"), (20, "blue")):
         ema = df["close"].ewm(span=period, adjust=False).mean()
         fig.add_trace(go.Scatter(x=df.index, y=ema, line=dict(width=1, color=color), name=f"EMA{period}"))
+
+    # Simple (not exponential) moving averages -- a separate toggleable layer
+    # on top of the EMA10/EMA20 pair above. Dashed + a distinct palette so
+    # they read as a different family of line at a glance; each is its own
+    # named trace, so clicking its legend entry shows/hides just that one --
+    # no extra UI needed, this is native Plotly legend behavior.
+    for period, color in ((10, "#b0b0b0"), (20, "#00bcd4"), (50, "#9c27b0"), (200, "#f44336")):
+        sma = df["close"].rolling(period).mean()
+        fig.add_trace(
+            go.Scatter(x=df.index, y=sma, line=dict(width=1, color=color, dash="dot"), name=f"SMA{period}")
+        )
 
     if marker_date is not None and marker_date in df.index:
         fig.add_vline(x=marker_date, line_dash="dash", line_color="green", annotation_text="signal day")
@@ -459,7 +480,10 @@ def plot_symbol(
                 lo, hi = sorted([entry_price, target_price])
                 fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(60,179,113,0.08)", line_width=0)
 
-    fig.update_layout(height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+    fig.update_layout(
+        title=dict(text=chart_title, font=dict(size=13)),
+        height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=35, b=10),
+    )
     return fig
 
 
