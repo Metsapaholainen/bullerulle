@@ -37,7 +37,17 @@ from scanner import (
 from data.fundamentals_cache import get_earnings_dates, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
-from pattern_diagrams import get_pattern_diagram
+from pattern_diagrams import get_pattern_diagram as _get_pattern_diagram_uncached
+
+
+@st.cache_data(show_spinner=False)
+def get_pattern_diagram(setup_key: str):
+    # These are pure, deterministic schematics (no randomness, no external
+    # data) but were being rebuilt on every single rerun anywhere in the
+    # app -- all 8 of them, unconditionally, since expander contents still
+    # execute even when visually collapsed. Caching removes that dead
+    # weight from every other interaction on the page.
+    return _get_pattern_diagram_uncached(setup_key)
 from settings import Settings
 from setups import SETUP_REGISTRY
 from setups.explanations import PATTERN_EXPLANATIONS
@@ -211,7 +221,7 @@ tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_settings = st
 # Chart helper
 # --------------------------------------------------------------------------
 CHART_PERIODS = {
-    "1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504, "All": None,
+    "5 days": 5, "1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504, "All": None,
 }
 
 
@@ -294,9 +304,24 @@ def compute_adr_pct_at(df: pd.DataFrame, date, lookback: int = 20):
     return float(((window["high"] / window["low"] - 1.0) * 100.0).mean())
 
 
+def _hash_settings_for_cache(s: Settings) -> str:
+    """Settings is a plain (non-frozen) dataclass, so it isn't natively
+    hashable -- this gives st.cache_data a stable, content-based key so the
+    plot cache correctly invalidates only when settings actually change."""
+    return str(s.to_dict())
+
+
+@st.cache_data(show_spinner=False, hash_funcs={Settings: _hash_settings_for_cache})
 def plot_symbol(
     df: pd.DataFrame, symbol: str, marker_date=None, setup_key=None, settings=None, row=None, side="long"
 ):
+    # Cached: this is a pure function of its arguments (no st.* calls, no
+    # hidden global state besides static module-level constants), and it's
+    # rebuilt on every single page rerun otherwise -- up to 5 of these plus
+    # 8 static pattern diagrams fire on ANY widget interaction anywhere in
+    # the app, since Streamlit reruns the whole script every time. Caching
+    # means switching a chart period/symbol elsewhere doesn't pay the cost
+    # of rebuilding every *other* unrelated chart on the page.
     fig = go.Figure()
     fig.add_trace(
         go.Candlestick(
@@ -766,8 +791,23 @@ with tab_scanner:
         if results.empty:
             st.warning("No matches yet -- click 'Run Scan', or loosen thresholds in the Designer tab.")
         else:
-            st.caption("Sorted by RS rating (momentum/leadership) first, then setup score.")
-            st.dataframe(results, use_container_width=True, height=350)
+            st.caption(
+                "Sorted by RS rating (momentum/leadership) first, then setup score -- grouped below by setup "
+                "so each table only shows columns that actually apply to that pattern (a Cup with Handle match "
+                "was never going to have a Double Bottom's columns, and vice versa). The rank column reflects "
+                "the overall cross-setup priority, so you can still tell what matters most at a glance."
+            )
+            results_ranked = results.copy()
+            results_ranked.insert(0, "rank", results_ranked.index + 1)
+            # Show setups in the order their best (highest-priority) match
+            # appears in the overall ranking, not alphabetically -- the
+            # group containing the #1 overall match comes first.
+            setup_order = results_ranked.groupby("setup")["rank"].min().sort_values().index.tolist()
+            for setup_label in setup_order:
+                group_df = results_ranked[results_ranked["setup"] == setup_label].dropna(axis=1, how="all")
+                st.markdown(f"**{setup_label}** ({len(group_df)} match{'es' if len(group_df) != 1 else ''})")
+                st.dataframe(group_df, use_container_width=True, height=min(80 + 35 * len(group_df), 350))
+
             col_pick, col_period = st.columns([3, 1])
             with col_pick:
                 pick = st.selectbox("Chart a match", results["symbol"].tolist())
@@ -993,7 +1033,7 @@ with tab_scanner:
                 with col_lpick:
                     legout_pick_label = st.selectbox("Chart a match", legout_match_labels, key="legout_chart_pick")
                 with col_lperiod:
-                    legout_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=3, key="legout_chart_period")
+                    legout_period = st.selectbox("Chart period", list(CHART_PERIODS.keys()), index=4, key="legout_chart_period")
 
                 legout_row = legout_results.iloc[legout_match_labels.index(legout_pick_label)]
                 legout_pick = legout_row["symbol"]
@@ -1026,9 +1066,12 @@ with tab_scanner:
             )
             fund_scope = st.radio(
                 "Symbols to fetch",
-                ["Last scan matches", "Momentum leaders", "Custom list"],
+                ["Last scan matches", "Legout scan matches", "Momentum leaders", "Custom list"],
                 horizontal=True,
                 key="fund_scope",
+                help="'Legout scan matches' uses whatever's currently in the Legout scans results table above "
+                "(run that first if it's empty) -- gives the fuller column set here (float, insider ratio, "
+                "next earnings date) plus a chart picker, beyond the few columns already shown inline there.",
             )
             fund_custom = ""
             if fund_scope == "Custom list":
@@ -1037,6 +1080,13 @@ with tab_scanner:
             if st.button("Fetch fundamentals", key="fund_fetch_btn"):
                 if fund_scope == "Last scan matches":
                     fund_symbols = results["symbol"].unique().tolist() if not results.empty else []
+                elif fund_scope == "Legout scan matches":
+                    legout_results_for_fund = st.session_state.get("legout_results")
+                    fund_symbols = (
+                        legout_results_for_fund["symbol"].unique().tolist()
+                        if legout_results_for_fund is not None and not legout_results_for_fund.empty
+                        else []
+                    )
                 elif fund_scope == "Momentum leaders":
                     fund_symbols = momentum_shortlist(
                         history, settings.universe.momentum_timeframes_days, settings.universe.momentum_top_pct
@@ -1045,7 +1095,9 @@ with tab_scanner:
                     fund_symbols = [s.strip().upper() for s in fund_custom.split(",") if s.strip()]
                 fund_symbols = [s for s in fund_symbols if s in history]
 
-                if not fund_symbols:
+                if not fund_symbols and fund_scope == "Legout scan matches":
+                    st.warning("No Legout scan matches yet -- run the Legout scans section above first.")
+                elif not fund_symbols:
                     st.warning("No symbols to fetch -- pick a scope with matches, or type some symbols.")
                 else:
                     try:
