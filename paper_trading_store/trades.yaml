@@ -1,0 +1,5 @@
+trades:
+- symbol: EFOR
+  decision_date: '2026-07-31'
+  setup_tag: Double Bottom (O'Neil)
+  notes: ''
