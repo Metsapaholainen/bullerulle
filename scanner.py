@@ -22,6 +22,10 @@ from settings import Settings
 from setups import SETUP_REGISTRY
 
 DEFAULT_BENCHMARK_SYMBOL = "SPY"
+# Nasdaq-100 proxy -- shown alongside SPY in the market-direction banner
+# since this scanner's universe skews growth/tech, where QQQ's trend is
+# often the more relevant read than the broader S&P 500 alone.
+SECONDARY_BENCHMARK_SYMBOL = "QQQ"
 
 # Setups whose scan() accepts a `fundamentals` kwarg for internal scoring
 # (currently just Episodic Pivot). Every other setup's results still get

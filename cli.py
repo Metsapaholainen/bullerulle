@@ -3,20 +3,26 @@
     python cli.py scan
     python cli.py scan --preset aggressive --symbols NVDA,SMCI,CVNA
     python cli.py backtest --setup breakout --start 2018-01-01 --end 2024-12-31
+    python cli.py sell-alerts
+    python cli.py sell-alerts --dry-run
 """
 from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
 import presets
 from backtest.engine import run_backtest
 from backtest.stats import compute_stats, stats_summary_text
+from data.cache import get_history_bulk
 from data.fmp_client import FMPClient, FMPError
+from notifications import send_sell_alerts
 from scanner import load_scan_universe_history, run_scan, scan_signals_over_history
+from sell_alerts import check_watchlist, load_watchlist
 from setups import SETUP_REGISTRY
 
 
@@ -87,6 +93,45 @@ def cmd_backtest(args):
         print(f"Wrote trade log to {args.output}")
 
 
+def cmd_sell_alerts(args):
+    """Checks the sell watchlist against its configured moving average and
+    pushes an ntfy.sh alert for anything currently closing below it. Designed
+    to be invoked once a day by an external scheduler (GitHub Actions, cron,
+    Task Scheduler) so alerts fire even when nobody has the app open --
+    Streamlit Community Cloud has no background/cron capability of its own."""
+    watchlist = load_watchlist(Path(args.watchlist) if args.watchlist else None)
+    if not watchlist:
+        print("Watchlist is empty -- add symbols via the app's Sell Alerts tab or edit the YAML directly.")
+        return
+
+    try:
+        client = FMPClient()
+    except FMPError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    symbols = [e["symbol"] for e in watchlist]
+    end = date.today()
+    start = end - timedelta(days=90)
+    history = get_history_bulk(client, symbols, start.isoformat(), end.isoformat(), on_progress=_progress_printer())
+    print(file=sys.stderr)
+
+    results = check_watchlist(history, watchlist)
+    print(results.to_string(index=False))
+
+    below = results[results["is_below"] == True]  # noqa: E712 (explicit True, not just truthy, since is_below can be None)
+    if below.empty:
+        print("\nNothing below its moving average today.")
+        return
+
+    if args.dry_run:
+        print(f"\n[dry-run] Would alert for: {', '.join(below['symbol'])}")
+        return
+
+    alerted = send_sell_alerts(below)
+    print(f"\nSent sell alerts for: {', '.join(alerted)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Qullamaggie-style scanner/backtester CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -106,6 +151,11 @@ def main():
     p_bt.add_argument("--end", required=True)
     p_bt.add_argument("--output", help="Optional trade-log CSV path")
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_sell = sub.add_parser("sell-alerts", help="Check the sell watchlist and push an ntfy.sh alert if needed")
+    p_sell.add_argument("--watchlist", help="Path to the watchlist YAML (default: config/sell_watchlist.yaml)")
+    p_sell.add_argument("--dry-run", action="store_true", help="Print what would be alerted without sending")
+    p_sell.set_defaults(func=cmd_sell_alerts)
 
     args = parser.parse_args()
     args.func(args)

@@ -1,0 +1,15 @@
+# Sell-side watchlist: one entry per stock you're holding, with the moving
+# average that should trigger a sell alert when the daily close drops below
+# it (10-day is the common default; use 20-day for slower/less twitchy
+# names). Edited either by hand here or from the app's "Sell Alerts" tab
+# (when run locally) -- commit + push after editing so the scheduled
+# GitHub Actions check picks up the change.
+#
+# Example:
+# watchlist:
+#   - symbol: AAPL
+#     ma_period: 10
+#   - symbol: NVDA
+#     ma_period: 20
+
+watchlist: []

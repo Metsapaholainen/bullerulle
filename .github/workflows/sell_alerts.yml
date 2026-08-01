@@ -1,0 +1,32 @@
+name: Sell alerts
+
+# Runs the sell watchlist check on a schedule so alerts fire even if nobody
+# has the Streamlit app open -- Streamlit Community Cloud has no background/
+# cron capability of its own, so this GitHub Actions job is the reliable
+# path (the app's "Sell Alerts" tab is for interactive use/live monitoring).
+#
+# Cron is UTC and fixed -- 21:30 UTC is ~4:30pm ET (drifts to ~5:30pm ET
+# during standard time vs. daylight time); not worth two separate cron
+# entries for a once-daily check comfortably after the US market close.
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Check watchlist and alert
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python cli.py sell-alerts

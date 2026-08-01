@@ -18,10 +18,11 @@ from backtest.engine import run_backtest
 from backtest.optimizer import run_grid_search, set_nested
 from backtest.stats import compute_stats, stats_summary_text
 from backtest.target_fit import find_parameters_for_target
-from data.cache import apply_live_quotes
+from data.cache import apply_live_quotes, get_history_bulk
 from data.fmp_client import FMPClient, FMPError
 from scanner import (
     DEFAULT_BENCHMARK_SYMBOL,
+    SECONDARY_BENCHMARK_SYMBOL,
     TIMEFRAME_LABELS,
     ensure_benchmark_loaded,
     find_approaching_pivot,
@@ -37,6 +38,7 @@ from scanner import (
 from data.fundamentals_cache import get_earnings_dates, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
+from notifications import send_ntfy_alert, send_sell_alerts
 from pattern_diagrams import get_pattern_diagram as _get_pattern_diagram_uncached
 
 
@@ -48,6 +50,7 @@ def get_pattern_diagram(setup_key: str):
     # execute even when visually collapsed. Caching removes that dead
     # weight from every other interaction on the page.
     return _get_pattern_diagram_uncached(setup_key)
+from sell_alerts import check_watchlist, load_watchlist, save_watchlist
 from settings import Settings
 from setups import SETUP_REGISTRY
 from setups.explanations import PATTERN_EXPLANATIONS
@@ -163,12 +166,19 @@ with st.sidebar:
                 on_progress=on_progress,
                 min_history_days=int(history_years * 365.25),
             )
-            # Also load SPY (cheap, one extra symbol) so the market-direction
-            # banner is available without a separate step.
+            # Also load SPY and QQQ (cheap, two extra symbols) so the
+            # market-direction banner is available without a separate step.
             start_for_benchmark = (pd.Timestamp(as_of) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
             ensure_benchmark_loaded(st.session_state.history, client, start_for_benchmark, str(as_of))
+            ensure_benchmark_loaded(
+                st.session_state.history, client, start_for_benchmark, str(as_of),
+                benchmark_symbol=SECONDARY_BENCHMARK_SYMBOL,
+            )
             st.session_state.market_direction = market_direction(
                 st.session_state.history.get(DEFAULT_BENCHMARK_SYMBOL)
+            )
+            st.session_state.market_direction_secondary = market_direction(
+                st.session_state.history.get(SECONDARY_BENCHMARK_SYMBOL)
             )
             progress.empty()
             st.success(f"Loaded {len(st.session_state.history)} symbols.")
@@ -203,27 +213,40 @@ history = st.session_state.history
 # CANSLIM's "M" -- market direction. O'Neil's premise: ~3 of every 4 stocks
 # follow the broad market's trend, so this is shown up top on every tab as
 # context for reading any individual match, not tucked away in a submenu.
-md = st.session_state.get("market_direction")
-if md:
+# Shown for both SPY (broad market) and QQQ (Nasdaq-100 -- often the more
+# relevant read for this scanner's growth/tech-skewed universe).
+def _render_market_banner(symbol: str, md: dict) -> None:
     fast_line = ""
     if md.get("fast_direction"):
         fast_line = (
             f"""<div style="font-size:0.85em; opacity:0.85; margin-top:2px;">"""
-            f"""{md['fast_emoji']} Short-term ({DEFAULT_BENCHMARK_SYMBOL} 10/20-day): """
+            f"""{md['fast_emoji']} Short-term ({symbol} 10/20-day): """
             f"""<b>{md['fast_direction']}</b> -- {md['fast_detail']}</div>"""
         )
     st.markdown(
         f"""<div style="border:1px solid #444; border-radius:8px; padding:8px 14px; margin-bottom:10px;">
-<b>{md['emoji']} Market ({DEFAULT_BENCHMARK_SYMBOL}): {md['direction']}</b> -- {md['detail']}
+<b>{md['emoji']} Market ({symbol}): {md['direction']}</b> -- {md['detail']}
 {fast_line}
 </div>""",
         unsafe_allow_html=True,
     )
-elif history:
-    st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY benchmark.")
 
-tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_settings = st.tabs(
-    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Settings"]
+
+md = st.session_state.get("market_direction")
+md_secondary = st.session_state.get("market_direction_secondary")
+if md or md_secondary:
+    col_md, col_md2 = st.columns(2)
+    with col_md:
+        if md:
+            _render_market_banner(DEFAULT_BENCHMARK_SYMBOL, md)
+    with col_md2:
+        if md_secondary:
+            _render_market_banner(SECONDARY_BENCHMARK_SYMBOL, md_secondary)
+elif history:
+    st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY/QQQ benchmarks.")
+
+tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_settings = st.tabs(
+    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Settings"]
 )
 
 
@@ -1482,6 +1505,174 @@ with tab_live:
             st.error(f"Live refresh failed: {exc}")
 
     render_live_panel()
+
+
+# --------------------------------------------------------------------------
+# Tab: Sell Alerts -- watchlist of held stocks, alert when the daily close
+# drops below a configurable 10- or 20-day moving average (a classic
+# trailing-stop/sell trigger, the mirror image of the buy-side setups
+# elsewhere in this app). The watchlist lives in config/sell_watchlist.yaml
+# (committed) so the same file also drives the scheduled GitHub Actions
+# check (`python cli.py sell-alerts`) that fires even when nobody has this
+# tab open -- Streamlit Community Cloud has no background/cron capability
+# of its own, so that scheduled job is the *reliable* path; this tab is for
+# interactive management, an on-demand check, and live monitoring while
+# markets are open and the tab stays open.
+# --------------------------------------------------------------------------
+with tab_sell:
+    st.subheader("Sell Alerts")
+    st.caption(
+        "Watch stocks you're holding and get a push notification the moment the daily close drops below "
+        "the moving average you choose (10-day is the common default; use 20-day for slower-moving names). "
+        "Delivered via ntfy.sh -- set NTFY_TOPIC in your .env/secrets, then subscribe to that same topic in "
+        "the free ntfy app or at ntfy.sh/<your-topic> to receive them. Changes made here are saved to "
+        "config/sell_watchlist.yaml; on Streamlit Cloud the container's disk doesn't persist, so edits there "
+        "only stick for the current session -- edit the file on GitHub (or run the app locally) to change "
+        "what the scheduled daily check below uses."
+    )
+
+    if "sell_watchlist" not in st.session_state:
+        st.session_state.sell_watchlist = load_watchlist()
+    if "sell_alerts_sent_today" not in st.session_state:
+        st.session_state.sell_alerts_sent_today = set()
+
+    st.markdown("**Watchlist**")
+    if not st.session_state.sell_watchlist:
+        st.info("No symbols yet -- add one below.")
+    else:
+        for i, entry in enumerate(st.session_state.sell_watchlist):
+            col_sym, col_ma, col_remove = st.columns([2, 2, 1])
+            col_sym.write(entry["symbol"])
+            col_ma.write(f"{entry['ma_period']}-day MA")
+            if col_remove.button("Remove", key=f"sell_remove_{i}"):
+                st.session_state.sell_watchlist.pop(i)
+                save_watchlist(st.session_state.sell_watchlist)
+                st.rerun()
+
+    col_add_sym, col_add_ma, col_add_btn = st.columns([2, 2, 1])
+    with col_add_sym:
+        new_symbol = st.text_input("Add symbol", key="sell_new_symbol").strip().upper()
+    with col_add_ma:
+        new_ma_period = st.radio("MA period", [10, 20], horizontal=True, key="sell_new_ma_period")
+    with col_add_btn:
+        st.write("")
+        if st.button("Add", key="sell_add_btn") and new_symbol:
+            existing_symbols = {e["symbol"] for e in st.session_state.sell_watchlist}
+            if new_symbol not in existing_symbols:
+                st.session_state.sell_watchlist.append({"symbol": new_symbol, "ma_period": int(new_ma_period)})
+                save_watchlist(st.session_state.sell_watchlist)
+                st.rerun()
+
+    st.divider()
+
+    col_check, col_test = st.columns([1, 1])
+    with col_check:
+        sell_check_now = st.button("Check now", key="sell_check_now")
+    with col_test:
+        if st.button("Send test alert", key="sell_test_alert"):
+            try:
+                send_ntfy_alert("Sell Alerts test", "If you got this, your ntfy.sh setup works.")
+                st.success("Test alert sent -- check your ntfy topic.")
+            except Exception as exc:
+                st.error(f"Test alert failed: {exc}")
+
+    if sell_check_now:
+        if not st.session_state.sell_watchlist:
+            st.warning("Add at least one symbol to the watchlist above first.")
+        else:
+            sell_symbols = [e["symbol"] for e in st.session_state.sell_watchlist]
+            try:
+                sell_client = get_client()
+                sell_end = pd.Timestamp.today().normalize()
+                sell_start = sell_end - pd.Timedelta(days=90)
+                sell_history = get_history_bulk(
+                    sell_client, sell_symbols, sell_start.strftime("%Y-%m-%d"), sell_end.strftime("%Y-%m-%d")
+                )
+                st.session_state.sell_check_results = check_watchlist(sell_history, st.session_state.sell_watchlist)
+            except Exception as exc:
+                st.error(f"Check failed: {exc}")
+
+    sell_results = st.session_state.get("sell_check_results")
+    if sell_results is not None and not sell_results.empty:
+        def _style_sell_row(row):
+            if row["is_below"] is True:
+                return ["background-color: #e74c3c; color: black;"] * len(row)
+            elif row["is_below"] is False:
+                return ["background-color: #2ecc71; color: black;"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            sell_results.style.apply(_style_sell_row, axis=1),
+            use_container_width=True,
+            height=min(80 + 35 * len(sell_results), 350),
+        )
+
+        below_rows = sell_results[sell_results["is_below"] == True]
+        if not below_rows.empty:
+            fresh_alerts = below_rows[~below_rows["symbol"].isin(st.session_state.sell_alerts_sent_today)]
+            if not fresh_alerts.empty:
+                try:
+                    alerted = send_sell_alerts(fresh_alerts)
+                    st.session_state.sell_alerts_sent_today.update(alerted)
+                    st.warning(f"Sell alert sent for: {', '.join(alerted)}")
+                except Exception as exc:
+                    st.error(f"Alert sending failed: {exc}")
+            else:
+                st.warning(f"Below MA (already alerted this session): {', '.join(below_rows['symbol'])}")
+
+    st.divider()
+    st.markdown("**Live checking** (while this tab stays open, during market hours)")
+
+    if "sell_live_on" not in st.session_state:
+        st.session_state.sell_live_on = False
+
+    col_live_toggle, col_live_refresh = st.columns([1, 1])
+    with col_live_toggle:
+        sell_live_on = st.toggle("Live checking on", value=st.session_state.sell_live_on, key="sell_live_toggle")
+        st.session_state.sell_live_on = sell_live_on
+    with col_live_refresh:
+        sell_refresh_label = st.selectbox(
+            "Refresh every", ["30s", "60s", "2min", "5min"], index=1, key="sell_live_refresh_label"
+        )
+    sell_refresh_seconds = {"30s": 30, "60s": 60, "2min": 120, "5min": 300}[sell_refresh_label]
+
+    @st.fragment(run_every=sell_refresh_seconds if sell_live_on else None)
+    def render_sell_live_panel():
+        if not st.session_state.sell_live_on:
+            st.info("Live checking is off.")
+            return
+        watchlist = st.session_state.sell_watchlist
+        if not watchlist:
+            st.warning("Add at least one symbol to the watchlist above.")
+            return
+        symbols = [e["symbol"] for e in watchlist]
+        missing = [s for s in symbols if s not in st.session_state.history]
+        if missing:
+            st.warning(
+                f"Not yet loaded (load from the sidebar first, including these in Custom symbols): {', '.join(missing)}"
+            )
+        watch_symbols = [s for s in symbols if s in st.session_state.history]
+        if not watch_symbols:
+            return
+        try:
+            live_client = get_client()
+            quotes = live_client.get_quotes(watch_symbols)
+            st.session_state.history = apply_live_quotes(st.session_state.history, quotes)
+            live_watchlist = [e for e in watchlist if e["symbol"] in watch_symbols]
+            live_results = check_watchlist(st.session_state.history, live_watchlist)
+            st.caption(f"Last refreshed {pd.Timestamp.now().strftime('%H:%M:%S')} -- watching {len(watch_symbols)} symbol(s).")
+            st.dataframe(live_results, use_container_width=True, height=min(80 + 35 * len(live_results), 300))
+
+            below_now = live_results[live_results["is_below"] == True]
+            fresh_live_alerts = below_now[~below_now["symbol"].isin(st.session_state.sell_alerts_sent_today)]
+            if not fresh_live_alerts.empty:
+                alerted = send_sell_alerts(fresh_live_alerts)
+                st.session_state.sell_alerts_sent_today.update(alerted)
+                st.warning(f"Sell alert sent for: {', '.join(alerted)}")
+        except Exception as exc:
+            st.error(f"Live check failed: {exc}")
+
+    render_sell_live_panel()
 
 
 # --------------------------------------------------------------------------
