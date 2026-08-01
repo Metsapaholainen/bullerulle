@@ -1059,8 +1059,18 @@ with tab_scanner:
             elif legout_results.empty:
                 st.warning("No matches -- try 'Everything loaded' scope, or different scans.")
             else:
-                st.caption(f"{len(legout_results)} match(es) across {legout_results['symbol'].nunique()} symbol(s).")
-                st.dataframe(legout_results, use_container_width=True, height=300)
+                st.caption(
+                    f"{len(legout_results)} match(es) across {legout_results['symbol'].nunique()} symbol(s). "
+                    "Click a row to chart that match below -- the selected row stays highlighted."
+                )
+                legout_table_event = st.dataframe(
+                    legout_results,
+                    use_container_width=True,
+                    height=300,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="legout_results_table",
+                )
 
                 legout_match_labels = [
                     f"{r['symbol']} -- {r['scan']} ({pd.Timestamp(r['date']).date()})"
@@ -1068,16 +1078,21 @@ with tab_scanner:
                 ]
                 # The selectbox below owns its displayed value via its `key`
                 # once set -- Streamlit ignores a later `index=` argument on
-                # a keyed widget, so Prev/Next must update the SAME key
-                # directly (before the selectbox is instantiated this run),
-                # not a separate index variable, or the click gets silently
-                # overwritten by the selectbox reading back its own stale
-                # keyed state a few lines later.
+                # a keyed widget, so both Prev/Next and a table row click
+                # must update the SAME key directly (before the selectbox is
+                # instantiated this run), not a separate index variable, or
+                # the click gets silently overwritten by the selectbox
+                # reading back its own stale keyed state a few lines later.
                 if (
                     "legout_chart_pick" not in st.session_state
                     or st.session_state.legout_chart_pick not in legout_match_labels
                 ):
                     st.session_state.legout_chart_pick = legout_match_labels[0]
+
+                clicked_rows = legout_table_event.selection.rows if legout_table_event.selection else []
+                if clicked_rows:
+                    st.session_state.legout_chart_pick = legout_match_labels[clicked_rows[0]]
+
                 current_lidx = legout_match_labels.index(st.session_state.legout_chart_pick)
 
                 col_lprev, col_lpick, col_lnext, col_lperiod = st.columns([1, 3, 1, 2])
