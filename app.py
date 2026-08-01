@@ -41,6 +41,7 @@ from fundamentals_classifier import classify_lynch, days_to_earnings, filter_ear
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
 from notifications import send_ntfy_alert, send_sell_alerts
 from paper_trading import (
+    freeze_closed_trades as pt_freeze_closed_trades,
     join_results as pt_join_results,
     load_rules as pt_load_rules,
     load_trades as pt_load_trades,
@@ -2236,6 +2237,16 @@ with tab_paper:
             st.session_state.paper_result, st.session_state.paper_skipped = pt_simulate(
                 history, st.session_state.paper_trades, st.session_state.paper_rules
             )
+            # Permanently record any trade that closed for real this run --
+            # otherwise its win/loss would only ever be recomputed live from
+            # `history`, and would silently revert to "Not simulated" once
+            # the loaded date window later moves past it.
+            updated_trades, froze_any = pt_freeze_closed_trades(
+                st.session_state.paper_trades, st.session_state.paper_result
+            )
+            if froze_any:
+                st.session_state.paper_trades = updated_trades
+                pt_save_trades(st.session_state.paper_trades)
             st.session_state.paper_fingerprint = paper_fingerprint
         paper_result = st.session_state.paper_result
         paper_skipped = st.session_state.paper_skipped
@@ -2279,6 +2290,33 @@ with tab_paper:
             selection_mode="single-row",
             key="paper_results_table",
         )
+
+        st.markdown("**Closed trades (history)**")
+        paper_closed = paper_joined[paper_joined["status"].isin(["Win", "Loss", "Breakeven"])].copy()
+        if paper_closed.empty:
+            st.caption(
+                "Nothing closed yet -- wins/losses collect here permanently once a logged trade hits its "
+                "stop, target, or trailing exit, regardless of what's currently loaded above."
+            )
+        else:
+            paper_closed["_exit_sort"] = pd.to_datetime(paper_closed["exit_date"])
+            paper_closed = paper_closed.sort_values("_exit_sort", ascending=False).drop(columns="_exit_sort")
+            closed_wins = int((paper_closed["status"] == "Win").sum())
+            closed_losses = int((paper_closed["status"] == "Loss").sum())
+            closed_total = len(paper_closed)
+            win_rate = (closed_wins / closed_total * 100) if closed_total else 0.0
+            avg_r = paper_closed["r_multiple"].mean()
+            st.caption(
+                f"{closed_total} closed -- {closed_wins}W / {closed_losses}L ({win_rate:.0f}% win rate), "
+                f"avg {avg_r:+.2f}R. Kept here permanently once realized, even after the loaded date range "
+                "moves past a trade."
+            )
+            st.dataframe(
+                paper_closed[display_cols].style.apply(_style_paper_row, axis=1),
+                use_container_width=True,
+                height=min(80 + 35 * len(paper_closed), 350),
+                key="paper_closed_table",
+            )
 
         paper_labels = [f"{r['symbol']} -- {r['decision_date']}" for _, r in paper_joined.iterrows()]
         if (

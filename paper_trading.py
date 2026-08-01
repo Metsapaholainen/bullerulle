@@ -136,11 +136,71 @@ def simulate(history: dict, trades: list, rules: BacktestSettings):
     return result, skipped
 
 
+# Fields frozen onto a trade entry once it genuinely closes (see
+# freeze_closed_trades) -- kept as plain strings/floats so they round-trip
+# through YAML cleanly.
+REALIZED_FIELDS = [
+    "entry_date", "entry_price", "partial_date", "partial_price",
+    "exit_date", "exit_price", "exit_reason", "r_multiple", "pnl", "status",
+]
+
+
+def _to_native_float(value):
+    """Trade fields (entry_price, r_multiple, etc.) arrive as numpy float64
+    -- pandas .loc lookups return numpy scalars, not native Python floats.
+    PyYAML's safe_dump can't represent numpy types at all, so anything
+    frozen into a trade entry must be cast to a plain float first, or
+    save_trades() raises a RepresenterError the next time this trade
+    closes and gets frozen."""
+    return None if value is None else float(value)
+
+
+def freeze_closed_trades(trades: list, result: BacktestResult) -> tuple[list, bool]:
+    """Once a logged trade actually closes (a real stop/target/trail exit --
+    not just running out of loaded data), permanently record its realized
+    outcome in the trade entry itself. Without this, a closed trade's
+    result is only ever recomputed live from `history` -- if the loaded
+    date window later moves past that trade (a rolling "History to load
+    (years)" range, or the symbol just isn't reloaded), it would silently
+    fall back to "Not simulated" and the win/loss would vanish from view.
+    Freezing it here means the Paper Trading journal keeps showing what
+    actually happened, indefinitely, regardless of what's currently loaded.
+
+    Returns (possibly-updated trades list, whether anything changed) so the
+    caller can skip an unnecessary save when nothing closed this run."""
+    trades_by_key = {(t.symbol, t.signal_date.strftime("%Y-%m-%d")): t for t in result.trades}
+    changed = False
+    updated = []
+    for entry in trades:
+        key = (entry["symbol"], entry["decision_date"])
+        trade = trades_by_key.get(key)
+        already_frozen = entry.get("status") in ("Win", "Loss", "Breakeven")
+        if trade is not None and trade.exit_reason != "end_of_data" and not already_frozen:
+            r = trade.r_multiple or 0
+            entry = {
+                **entry,
+                "entry_date": trade.entry_date.strftime("%Y-%m-%d"),
+                "entry_price": _to_native_float(trade.entry_price),
+                "partial_date": trade.partial_date.strftime("%Y-%m-%d") if trade.partial_date is not None else None,
+                "partial_price": _to_native_float(trade.partial_price),
+                "exit_date": trade.exit_date.strftime("%Y-%m-%d"),
+                "exit_price": _to_native_float(trade.exit_price),
+                "exit_reason": trade.exit_reason,
+                "r_multiple": _to_native_float(trade.r_multiple),
+                "pnl": _to_native_float(trade.pnl),
+                "status": "Win" if r > 0 else ("Loss" if r < 0 else "Breakeven"),
+            }
+            changed = True
+        updated.append(entry)
+    return updated, changed
+
+
 def join_results(trades: list, result: BacktestResult, skipped: list) -> pd.DataFrame:
     """One row per logged entry: matched to its realized Trade by
-    (symbol, signal_date) where the engine actually produced one, otherwise
-    an explicit "Pending" or "Not simulated" reason -- so a logged entry
-    never just disappears without explanation."""
+    (symbol, signal_date) where the engine actually produced one this run;
+    otherwise a previously frozen closed outcome (see freeze_closed_trades)
+    if there is one; otherwise an explicit "Pending" or "Not simulated"
+    reason -- so a logged entry never just disappears without explanation."""
     skipped_by_key = {(s["symbol"], s["decision_date"]): s for s in skipped}
     trades_by_key = {(t.symbol, t.signal_date.strftime("%Y-%m-%d")): t for t in result.trades}
 
@@ -172,6 +232,11 @@ def join_results(trades: list, result: BacktestResult, skipped: list) -> pd.Data
                     "status": "Open" if still_open_at_end else ("Win" if r > 0 else ("Loss" if r < 0 else "Breakeven")),
                 }
             )
+        elif entry.get("status") in ("Win", "Loss", "Breakeven"):
+            # Not re-simulable this run (e.g. loaded history no longer
+            # covers this date range), but its outcome was frozen when it
+            # closed -- show that instead of losing it to "Not simulated".
+            rows.append({**base, **{field: entry.get(field) for field in REALIZED_FIELDS}})
         else:
             skip_info = skipped_by_key.get(key)
             if skip_info is not None:
