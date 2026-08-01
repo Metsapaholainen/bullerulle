@@ -5,5 +5,6 @@ __pycache__/
 cache/*.parquet
 cache/fundamentals/
 presets_store/*.yaml
+paper_trading_store/
 scan_*.csv
 .streamlit/secrets.toml

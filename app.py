@@ -39,6 +39,14 @@ from data.fundamentals_cache import get_earnings_dates, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
 from notifications import send_ntfy_alert, send_sell_alerts
+from paper_trading import (
+    join_results as pt_join_results,
+    load_rules as pt_load_rules,
+    load_trades as pt_load_trades,
+    save_rules as pt_save_rules,
+    save_trades as pt_save_trades,
+    simulate as pt_simulate,
+)
 from pattern_diagrams import get_pattern_diagram as _get_pattern_diagram_uncached
 
 
@@ -51,7 +59,7 @@ def get_pattern_diagram(setup_key: str):
     # weight from every other interaction on the page.
     return _get_pattern_diagram_uncached(setup_key)
 from sell_alerts import check_watchlist, load_watchlist, save_watchlist
-from settings import Settings
+from settings import BacktestSettings, Settings
 from setups import SETUP_REGISTRY
 from setups.explanations import PATTERN_EXPLANATIONS
 from ui_helpers import render_stat_badges, style_results_dataframe
@@ -245,8 +253,8 @@ if md or md_secondary:
 elif history:
     st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY/QQQ benchmarks.")
 
-tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_settings = st.tabs(
-    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Settings"]
+tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_paper, tab_settings = st.tabs(
+    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Paper Trading", "Settings"]
 )
 
 
@@ -346,7 +354,10 @@ def _hash_settings_for_cache(s: Settings) -> str:
 
 @st.cache_data(show_spinner=False, hash_funcs={Settings: _hash_settings_for_cache})
 def plot_symbol(
-    df: pd.DataFrame, symbol: str, marker_date=None, setup_key=None, settings=None, row=None, side="long"
+    df: pd.DataFrame, symbol: str, marker_date=None, setup_key=None, settings=None, row=None, side="long",
+    entry_date=None, entry_price=None, stop_price=None, target_price=None,
+    partial_date=None, partial_price=None,
+    exit_date=None, exit_price=None, exit_reason=None, r_multiple=None,
 ):
     # Cached: this is a pure function of its arguments (no st.* calls, no
     # hidden global state besides static module-level constants), and it's
@@ -479,6 +490,53 @@ def plot_symbol(
                 fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(255,0,0,0.06)", line_width=0)
                 lo, hi = sorted([entry_price, target_price])
                 fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(60,179,113,0.08)", line_width=0)
+
+        # Realized paper-trade outcome -- draws the ACTUAL entry/stop/target/
+        # partial/exit from a real simulated Trade result, passed directly by
+        # the caller (Paper Trading tab) rather than recomputed from
+        # `settings` like the static projection above. Independent of the
+        # `settings is not None` block so it works even when settings=None.
+        # Uses pd.notna() throughout (not `is not None`) since these values
+        # arrive via a DataFrame row -- missing entries show up as NaT/NaN,
+        # not Python None, once mixed into a column with real values.
+        if pd.notna(entry_date) and pd.notna(entry_price):
+            fig.add_trace(
+                go.Scatter(
+                    x=[entry_date], y=[entry_price], mode="markers",
+                    marker=dict(symbol="diamond", size=12, color="cyan", line=dict(width=1, color="black")),
+                    name="Entry", showlegend=False,
+                )
+            )
+            if pd.notna(stop_price):
+                fig.add_hline(
+                    y=stop_price, line_dash="dash", line_color="red",
+                    annotation_text=f"Stop {stop_price:.2f}", annotation_position="bottom right",
+                )
+            if pd.notna(target_price):
+                fig.add_hline(
+                    y=target_price, line_dash="dash", line_color="mediumseagreen",
+                    annotation_text=f"Target {target_price:.2f}", annotation_position="top right",
+                )
+            if pd.notna(partial_date) and pd.notna(partial_price):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[partial_date], y=[partial_price], mode="markers+text",
+                        marker=dict(symbol="diamond", size=13, color="orange", line=dict(width=1, color="black")),
+                        text=["Sold half"], textposition="bottom center", textfont=dict(color="orange"),
+                        name="Partial exit", showlegend=False,
+                    )
+                )
+            if pd.notna(exit_date) and pd.notna(exit_price):
+                r_val = r_multiple if pd.notna(r_multiple) else 0
+                exit_color = "lime" if r_val > 0 else ("red" if r_val < 0 else "gray")
+                fig.add_trace(
+                    go.Scatter(
+                        x=[exit_date], y=[exit_price], mode="markers+text",
+                        marker=dict(symbol="x", size=14, color=exit_color, line=dict(width=1, color="black")),
+                        text=[exit_reason or "exit"], textposition="top center", textfont=dict(color=exit_color),
+                        name="Exit", showlegend=False,
+                    )
+                )
 
     fig.update_layout(
         title=dict(text=chart_title, font=dict(size=13)),
@@ -1712,6 +1770,201 @@ with tab_sell:
             st.error(f"Live check failed: {exc}")
 
     render_sell_live_panel()
+
+
+# --------------------------------------------------------------------------
+# Tab: Paper Trading -- log a hand-picked (symbol, decision date) "buy-in"
+# and simulate it through the exact same trade-management engine (stop-loss,
+# sell-half at an R-target or day-limit, then a trailing moving-average exit
+# for the rest) that every automated setup in this app already uses, via
+# `paper_trading.py` -- a thin journal layer over backtest.engine.run_backtest,
+# not a new simulator. Uses its OWN fixed exit-rule settings (below),
+# independent of the Designer tab's "Backtest mechanics", so a logged trade's
+# shown outcome never silently shifts just because those are being tuned
+# elsewhere for scanning purposes.
+# --------------------------------------------------------------------------
+with tab_paper:
+    st.subheader("Paper Trading")
+    st.caption(
+        "Log a stock and the day you'd have decided to buy it -- this simulates a real 3-5 day swing trade "
+        "(stop loss from entry, sell half at a profit target or after a few days, then trail the rest on a "
+        "moving average) using the exact same trade-management engine as the Backtest tab, so the numbers "
+        "are grounded in real mechanics, not a guess. The point is to build a track record of your own "
+        "pattern-spotting and see, in aggregate, whether it would have made money. The 'decision date' is "
+        "when you'd have decided to buy -- the simulated entry fills at the next trading day's open, same as "
+        "every automated setup elsewhere in this app."
+    )
+
+    if "paper_trades" not in st.session_state:
+        st.session_state.paper_trades = pt_load_trades()
+    if "paper_rules" not in st.session_state:
+        st.session_state.paper_rules = pt_load_rules()
+
+    with st.expander("Paper trading rules (independent of the Designer tab)", expanded=False):
+        st.caption(
+            "These stay fixed regardless of what you tune in Designer -> Backtest mechanics, so your journal's "
+            "past results don't silently change out from under you."
+        )
+        pr = st.session_state.paper_rules
+        col_r1, col_r2, col_r3 = st.columns(3)
+        with col_r1:
+            pr.stop_adr_multiple = st.slider(
+                "Stop distance (x ADR)", 0.25, 3.0, float(pr.stop_adr_multiple), 0.25, key="pt_stop_adr"
+            )
+            pr.partial_profit_r_multiple = st.slider(
+                "Sell-half target (R)", 0.5, 5.0, float(pr.partial_profit_r_multiple), 0.5, key="pt_partial_r"
+            )
+        with col_r2:
+            pr.partial_profit_max_days = st.slider(
+                "Sell half by day N regardless", 1, 15, int(pr.partial_profit_max_days), key="pt_partial_days"
+            )
+            pr.partial_profit_fraction = st.slider(
+                "Fraction sold at partial", 0.1, 1.0, float(pr.partial_profit_fraction), 0.05, key="pt_partial_frac"
+            )
+        with col_r3:
+            pr.trail_ema_period = st.slider(
+                "Trailing MA period (days)", 5, 50, int(pr.trail_ema_period), key="pt_trail_period"
+            )
+            pr.trail_ma_type = st.selectbox(
+                "Trailing MA type", ["sma", "ema"], index=0 if pr.trail_ma_type == "sma" else 1, key="pt_trail_type"
+            )
+        col_r4, col_r5 = st.columns(2)
+        with col_r4:
+            pr.initial_capital = st.number_input(
+                "Hypothetical starting capital ($)", value=float(pr.initial_capital), step=5000.0, key="pt_capital"
+            )
+            pr.risk_pct_per_trade = st.slider(
+                "Risk % per trade", 0.1, 5.0, float(pr.risk_pct_per_trade), 0.1, key="pt_risk_pct"
+            )
+        with col_r5:
+            pr.max_positions = st.slider("Max concurrent positions", 1, 20, int(pr.max_positions), key="pt_max_pos")
+            pr.max_position_pct_of_equity = st.slider(
+                "Max position size (% of equity)", 5.0, 100.0, float(pr.max_position_pct_of_equity), 5.0,
+                key="pt_max_pos_pct",
+            )
+        pt_save_rules(pr)
+
+    st.markdown("**Log a buy-in**")
+    col_add_sym, col_add_date, col_add_tag = st.columns([1, 1, 2])
+    with col_add_sym:
+        paper_new_symbol = st.text_input("Symbol", key="paper_new_symbol").strip().upper()
+    with col_add_date:
+        paper_new_date = st.date_input("Decision date", value=pd.Timestamp(as_of), key="paper_new_date")
+    with col_add_tag:
+        paper_new_tag = st.selectbox(
+            "Pattern you think you spotted",
+            ["Gut feel / other"] + [spec["label"] for spec in SETUP_REGISTRY.values()],
+            key="paper_new_tag",
+        )
+    paper_new_notes = st.text_input("Notes (optional)", key="paper_new_notes")
+    if st.button("Log buy-in", key="paper_add_btn") and paper_new_symbol:
+        new_entry_key = (paper_new_symbol, str(paper_new_date))
+        existing_keys = {(e["symbol"], e["decision_date"]) for e in st.session_state.paper_trades}
+        if new_entry_key in existing_keys:
+            st.warning(f"Already logged {paper_new_symbol} on {paper_new_date} -- remove it below first if you want to re-log it.")
+        else:
+            st.session_state.paper_trades.append(
+                {
+                    "symbol": paper_new_symbol,
+                    "decision_date": str(paper_new_date),
+                    "setup_tag": paper_new_tag,
+                    "notes": paper_new_notes,
+                }
+            )
+            pt_save_trades(st.session_state.paper_trades)
+            st.rerun()
+
+    st.divider()
+
+    if not st.session_state.paper_trades:
+        st.info("No paper trades logged yet -- add one above.")
+    else:
+        paper_result, paper_skipped = pt_simulate(history, st.session_state.paper_trades, st.session_state.paper_rules)
+        paper_joined = pt_join_results(st.session_state.paper_trades, paper_result, paper_skipped)
+
+        stats = compute_stats(paper_result)
+        render_stat_badges(stats)
+        if paper_result.equity_curve is not None and not paper_result.equity_curve.empty:
+            eq_fig = go.Figure()
+            eq_fig.add_trace(
+                go.Scatter(x=paper_result.equity_curve.index, y=paper_result.equity_curve.values, mode="lines", line=dict(color="mediumseagreen"))
+            )
+            eq_fig.update_layout(
+                title=dict(text="Hypothetical account equity", font=dict(size=13)),
+                height=250, margin=dict(l=10, r=10, t=35, b=10),
+            )
+            st.plotly_chart(eq_fig, use_container_width=True, key="paper_equity_chart")
+
+        st.markdown("**Logged trades**")
+
+        def _style_paper_row(row):
+            status = row["status"]
+            color = {"Win": "#2ecc71", "Loss": "#e74c3c", "Open": "#f1c40f", "Not simulated": "#888888"}.get(status)
+            if color is None:
+                return [""] * len(row)
+            return [f"background-color: {color}; color: black;"] * len(row)
+
+        display_cols = [
+            "symbol", "decision_date", "setup_tag", "entry_date", "entry_price",
+            "partial_date", "partial_price", "exit_date", "exit_price", "exit_reason",
+            "r_multiple", "pnl", "status",
+        ]
+        paper_table_event = st.dataframe(
+            paper_joined[display_cols].style.apply(_style_paper_row, axis=1),
+            use_container_width=True,
+            height=min(80 + 35 * len(paper_joined), 350),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="paper_results_table",
+        )
+
+        paper_labels = [f"{r['symbol']} -- {r['decision_date']}" for _, r in paper_joined.iterrows()]
+        if (
+            "paper_chart_pick" not in st.session_state
+            or st.session_state.paper_chart_pick not in paper_labels
+        ):
+            st.session_state.paper_chart_pick = paper_labels[0]
+
+        clicked_paper_rows = paper_table_event.selection.rows if paper_table_event.selection else []
+        if clicked_paper_rows:
+            st.session_state.paper_chart_pick = paper_labels[clicked_paper_rows[0]]
+
+        col_paper_pick, col_paper_remove = st.columns([3, 1])
+        with col_paper_pick:
+            paper_pick_label = st.selectbox("Chart this trade", paper_labels, key="paper_chart_pick")
+        paper_pick_idx = paper_labels.index(paper_pick_label)
+        with col_paper_remove:
+            st.write("")
+            if st.button("Remove this trade", key="paper_remove_btn"):
+                st.session_state.paper_trades.pop(paper_pick_idx)
+                pt_save_trades(st.session_state.paper_trades)
+                st.rerun()
+
+        paper_pick_row = paper_joined.iloc[paper_pick_idx]
+        paper_pick_symbol = paper_pick_row["symbol"]
+        if paper_pick_symbol not in history:
+            st.warning(f"{paper_pick_symbol} isn't loaded -- load it from the sidebar first to see its chart.")
+        else:
+            st.plotly_chart(
+                plot_symbol(
+                    history[paper_pick_symbol],
+                    paper_pick_symbol,
+                    marker_date=pd.Timestamp(paper_pick_row["decision_date"]),
+                    side="long",
+                    entry_date=paper_pick_row["entry_date"],
+                    entry_price=paper_pick_row["entry_price"],
+                    partial_date=paper_pick_row["partial_date"],
+                    partial_price=paper_pick_row["partial_price"],
+                    exit_date=paper_pick_row["exit_date"],
+                    exit_price=paper_pick_row["exit_price"],
+                    exit_reason=paper_pick_row["exit_reason"],
+                    r_multiple=paper_pick_row["r_multiple"],
+                ),
+                use_container_width=True,
+                key="paper_chart",
+            )
+            if paper_pick_row["notes"]:
+                st.caption(f"Notes: {paper_pick_row['notes']}")
 
 
 # --------------------------------------------------------------------------

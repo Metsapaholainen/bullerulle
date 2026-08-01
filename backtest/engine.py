@@ -43,6 +43,9 @@ class Trade:
     shares: float = 0.0
     partial_taken: bool = False
     partial_pnl: float = 0.0
+    partial_date: Optional[pd.Timestamp] = None
+    partial_price: Optional[float] = None
+    partial_shares: Optional[float] = None
     exit_date: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None
@@ -70,6 +73,7 @@ class BacktestResult:
                 columns=[
                     "symbol", "side", "signal_date", "entry_date", "entry_price",
                     "exit_date", "exit_price", "exit_reason", "shares", "pnl", "r_multiple",
+                    "partial_date", "partial_price", "partial_shares",
                 ]
             )
         rows = []
@@ -87,6 +91,9 @@ class BacktestResult:
                     "shares": t.initial_shares,
                     "pnl": t.pnl,
                     "r_multiple": t.r_multiple,
+                    "partial_date": t.partial_date,
+                    "partial_price": t.partial_price,
+                    "partial_shares": t.partial_shares,
                 }
             )
         return pd.DataFrame(rows)
@@ -108,7 +115,7 @@ def _prepare_signal_frame(df: pd.DataFrame, trail_period: int, trail_ma_type: st
     return d
 
 
-def _apply_partial(trade: Trade, price: float, side: str, bt: BacktestSettings, cash: float) -> float:
+def _apply_partial(trade: Trade, price: float, side: str, bt: BacktestSettings, cash: float, date=None) -> float:
     """Sell/cover `partial_profit_fraction` of the position at `price`, and --
     if configured -- move the stop to breakeven. Returns the updated cash."""
     partial_shares = trade.shares * bt.partial_profit_fraction
@@ -120,6 +127,9 @@ def _apply_partial(trade: Trade, price: float, side: str, bt: BacktestSettings, 
         trade.partial_pnl += (trade.entry_price - price) * partial_shares
     trade.shares -= partial_shares
     trade.partial_taken = True
+    trade.partial_date = date
+    trade.partial_price = price
+    trade.partial_shares = partial_shares
     if bt.move_stop_to_breakeven_after_partial:
         trade.stop_price = max(trade.stop_price, trade.entry_price) if side == "long" else min(trade.stop_price, trade.entry_price)
     return cash
@@ -198,18 +208,18 @@ def run_backtest(
                 if bar["low"] <= trade.stop_price:
                     exit_price, exit_reason = trade.stop_price, "stop"
                 elif not trade.partial_taken and trade.target_price and bar["high"] >= trade.target_price:
-                    cash = _apply_partial(trade, trade.target_price, side, bt, cash)
+                    cash = _apply_partial(trade, trade.target_price, side, bt, cash, date=date)
                 elif time_partial_due:
-                    cash = _apply_partial(trade, bar["close"], side, bt, cash)
+                    cash = _apply_partial(trade, bar["close"], side, bt, cash, date=date)
                 elif bar["close"] < bar["trail_ema"]:
                     exit_price, exit_reason = bar["close"], "trail"
             else:  # short
                 if bar["high"] >= trade.stop_price:
                     exit_price, exit_reason = trade.stop_price, "stop"
                 elif not trade.partial_taken and trade.target_price and bar["low"] <= trade.target_price:
-                    cash = _apply_partial(trade, trade.target_price, side, bt, cash)
+                    cash = _apply_partial(trade, trade.target_price, side, bt, cash, date=date)
                 elif time_partial_due:
-                    cash = _apply_partial(trade, bar["close"], side, bt, cash)
+                    cash = _apply_partial(trade, bar["close"], side, bt, cash, date=date)
                 elif bar["close"] > bar["trail_ema"]:
                     exit_price, exit_reason = bar["close"], "trail"
 
