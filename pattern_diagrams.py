@@ -5,6 +5,11 @@ like" has a picture next to the paragraph, not just a description. Curves
 are hand-built smooth shapes with a bit of texture (a sine ripple) so bases
 don't read as a perfectly flat line, but they're illustrative geometry, not
 a real ticker's price history.
+
+Each diagram also marks the ideal *entry zone* -- where you'd actually pull
+the trigger -- as a shaded vertical band (green for a long breakout entry,
+orange for the Parabolic Short's reversal entry), plus a dotted line at the
+resistance/pivot level being broken, where one applies.
 """
 from __future__ import annotations
 
@@ -12,6 +17,10 @@ import numpy as np
 import plotly.graph_objects as go
 
 N = 200  # points per diagram
+
+# Reusable entry-zone styling: (fill_color, border_color, text_color)
+_BUY_ENTRY_STYLE = ("rgba(50,205,50,0.28)", "rgba(50,205,50,0.9)", "#39ff14")
+_SHORT_ENTRY_STYLE = ("rgba(255,140,0,0.28)", "rgba(255,140,0,0.9)", "#ffa500")
 
 
 def _curve(control_points: list, ripple_regions: list = None) -> np.ndarray:
@@ -31,7 +40,18 @@ def _curve(control_points: list, ripple_regions: list = None) -> np.ndarray:
     return y
 
 
-def _figure(y: np.ndarray, regions: list, marker_label: str = "Breakout", marker_color: str = "lime") -> go.Figure:
+def _figure(
+    y: np.ndarray,
+    regions: list,
+    marker_x_frac: float = 1.0,
+    marker_label: str = "Breakout",
+    marker_color: str = "lime",
+    pivot: tuple = None,
+    entry_zone: tuple = None,
+) -> go.Figure:
+    """regions: [(x0f, x1f, label, fill_color), ...] -- the base/cup/flag shading.
+    pivot: (price_level, x0f, x1f) -- dotted resistance line to show what's being broken.
+    entry_zone: (x0f, x1f, label, style) where style is one of the _*_ENTRY_STYLE tuples above."""
     x = np.arange(len(y))
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line=dict(width=2.5, color="#4da6ff"), showlegend=False))
@@ -40,9 +60,23 @@ def _figure(y: np.ndarray, regions: list, marker_label: str = "Breakout", marker
             x0=x0f * (N - 1), x1=x1f * (N - 1), fillcolor=color, line_width=0,
             annotation_text=label, annotation_position="top left", annotation_font_size=11,
         )
+    if pivot:
+        pivot_value, px0f, px1f = pivot
+        fig.add_shape(
+            type="line", x0=px0f * (N - 1), x1=px1f * (N - 1), y0=pivot_value, y1=pivot_value,
+            line=dict(color="rgba(255,255,255,0.6)", width=1.5, dash="dot"),
+        )
+    if entry_zone:
+        ex0f, ex1f, elabel, (efill, eborder, etext) = entry_zone
+        fig.add_vrect(
+            x0=ex0f * (N - 1), x1=ex1f * (N - 1), fillcolor=efill, line_width=1.5, line_color=eborder,
+            annotation_text=elabel, annotation_position="bottom left",
+            annotation_font_size=10, annotation_font_color=etext,
+        )
+    marker_idx = int(round(marker_x_frac * (len(y) - 1)))
     fig.add_trace(
         go.Scatter(
-            x=[len(y) - 1], y=[y[-1]], mode="markers+text",
+            x=[marker_idx], y=[y[marker_idx]], mode="markers+text",
             marker=dict(symbol="star", size=14, color=marker_color, line=dict(width=1, color="black")),
             text=[marker_label], textposition="top center", textfont=dict(color=marker_color, size=11),
             showlegend=False,
@@ -61,63 +95,109 @@ def _figure(y: np.ndarray, regions: list, marker_label: str = "Breakout", marker
 
 def _breakout_diagram():
     y = _curve(
-        [(0, 1.0), (0.35, 1.55), (0.55, 1.42), (0.85, 1.52), (1.0, 1.85)],
-        ripple_regions=[(0.35, 0.85, 0.05)],
+        [(0, 1.0), (0.35, 1.55), (0.55, 1.42), (0.8, 1.52), (0.87, 1.56), (1.0, 1.8)],
+        ripple_regions=[(0.35, 0.8, 0.03)],
     )
-    return _figure(y, [(0.0, 0.35, "Prior move", "rgba(100,149,237,0.10)"), (0.35, 0.85, "Base", "rgba(100,149,237,0.18)")])
+    return _figure(
+        y,
+        [(0.0, 0.35, "Prior move", "rgba(100,149,237,0.10)"), (0.35, 0.8, "Base", "rgba(100,149,237,0.18)")],
+        marker_x_frac=0.87, marker_label="Breakout entry",
+        pivot=(1.56, 0.35, 0.87),
+        entry_zone=(0.83, 0.92, "Entry zone", _BUY_ENTRY_STYLE),
+    )
 
 
 def _episodic_pivot_diagram():
-    y = _curve([(0, 1.0), (0.6, 1.02), (0.63, 1.42), (1.0, 1.5)], ripple_regions=[(0.0, 0.6, 0.03)])
-    return _figure(y, [(0.0, 0.6, "Quiet base", "rgba(100,149,237,0.15)")], marker_label="Gap up on volume")
+    y = _curve([(0, 1.0), (0.55, 1.02), (0.6, 1.45), (1.0, 1.62)], ripple_regions=[(0.0, 0.55, 0.03)])
+    return _figure(
+        y,
+        [(0.0, 0.55, "Quiet base", "rgba(100,149,237,0.15)")],
+        marker_x_frac=0.6, marker_label="Gap up on volume",
+        pivot=(1.05, 0.0, 0.6),
+        entry_zone=(0.57, 0.66, "Entry (gap day)", _BUY_ENTRY_STYLE),
+    )
 
 
 def _parabolic_short_diagram():
-    y = _curve([(0, 1.0), (0.45, 1.25), (0.75, 2.15), (1.0, 3.0)])
+    y = _curve([(0, 1.0), (0.45, 1.25), (0.7, 1.95), (0.85, 2.5), (1.0, 2.05)])
     return _figure(
-        y, [(0.45, 1.0, "Extension", "rgba(255,0,0,0.10)")],
-        marker_label="Overextended -- short candidate", marker_color="orange",
+        y, [(0.45, 0.85, "Extension", "rgba(255,0,0,0.10)")],
+        marker_x_frac=0.85, marker_label="Overextended -- short entry", marker_color="orange",
+        entry_zone=(0.81, 0.89, "Short entry zone", _SHORT_ENTRY_STYLE),
     )
 
 
 def _cup_with_handle_diagram():
     y = _curve(
-        [(0, 1.0), (0.25, 1.55), (0.45, 1.08), (0.65, 1.52), (0.8, 1.38), (0.95, 1.53), (1.0, 1.7)],
-        ripple_regions=[(0.8, 0.95, 0.03)],
+        [
+            (0, 1.0), (0.2, 1.6), (0.35, 1.28), (0.475, 1.15), (0.6, 1.28), (0.75, 1.58),
+            (0.82, 1.48), (0.9, 1.53), (0.97, 1.62), (1.0, 1.72),
+        ],
+        ripple_regions=[(0.35, 0.6, 0.02), (0.75, 0.9, 0.02)],
     )
     return _figure(
         y,
-        [(0.25, 0.8, "Cup", "rgba(100,149,237,0.12)"), (0.8, 0.95, "Handle", "rgba(255,165,0,0.30)")],
+        [(0.2, 0.75, "Cup", "rgba(100,149,237,0.12)"), (0.75, 0.9, "Handle", "rgba(255,165,0,0.30)")],
+        marker_x_frac=0.97, marker_label="Breakout entry",
+        pivot=(1.6, 0.2, 0.97),
+        entry_zone=(0.93, 1.0, "Entry zone", _BUY_ENTRY_STYLE),
     )
 
 
 def _double_bottom_diagram():
-    y = _curve([(0, 1.35), (0.2, 1.0), (0.45, 1.28), (0.7, 1.03), (0.85, 1.18), (1.0, 1.45)])
-    return _figure(y, [(0.0, 0.85, "W pattern", "rgba(100,149,237,0.15)")])
+    y = _curve(
+        [(0, 1.5), (0.15, 1.0), (0.4, 1.32), (0.65, 0.95), (0.85, 1.25), (0.9, 1.33), (1.0, 1.55)],
+        ripple_regions=[(0.05, 0.2, 0.02), (0.55, 0.7, 0.02)],
+    )
+    return _figure(
+        y,
+        [(0.0, 0.9, "W pattern", "rgba(100,149,237,0.15)")],
+        marker_x_frac=0.9, marker_label="Breakout entry",
+        pivot=(1.32, 0.4, 0.9),
+        entry_zone=(0.86, 0.94, "Entry zone", _BUY_ENTRY_STYLE),
+    )
 
 
 def _flat_base_diagram():
     y = _curve(
-        [(0, 1.0), (0.3, 1.55), (0.85, 1.58), (1.0, 1.85)],
-        ripple_regions=[(0.3, 0.85, 0.045)],
+        [(0, 1.0), (0.3, 1.55), (0.55, 1.58), (0.85, 1.56), (0.92, 1.6), (1.0, 1.85)],
+        ripple_regions=[(0.3, 0.85, 0.025)],
     )
-    return _figure(y, [(0.0, 0.3, "Prior move", "rgba(100,149,237,0.10)"), (0.3, 0.85, "Flat base", "rgba(100,149,237,0.18)")])
+    return _figure(
+        y,
+        [(0.0, 0.3, "Prior move", "rgba(100,149,237,0.10)"), (0.3, 0.85, "Flat base", "rgba(100,149,237,0.18)")],
+        marker_x_frac=0.92, marker_label="Breakout entry",
+        pivot=(1.6, 0.3, 0.92),
+        entry_zone=(0.88, 0.96, "Entry zone", _BUY_ENTRY_STYLE),
+    )
 
 
 def _ascending_base_diagram():
     y = _curve(
-        [(0, 1.0), (0.18, 1.3), (0.32, 1.16), (0.5, 1.48), (0.65, 1.36), (0.83, 1.62), (0.95, 1.55), (1.0, 1.85)],
-        ripple_regions=[(0.0, 0.95, 0.02)],
+        [(0, 1.0), (0.18, 1.3), (0.32, 1.16), (0.5, 1.48), (0.65, 1.36), (0.83, 1.62), (0.9, 1.55), (0.96, 1.65), (1.0, 1.78)],
+        ripple_regions=[(0.0, 0.83, 0.015)],
     )
-    return _figure(y, [(0.0, 0.95, "Ascending base (higher lows/highs)", "rgba(100,149,237,0.15)")])
+    return _figure(
+        y,
+        [(0.0, 0.9, "Ascending base (higher lows/highs)", "rgba(100,149,237,0.15)")],
+        marker_x_frac=0.96, marker_label="Breakout entry",
+        pivot=(1.62, 0.83, 0.96),
+        entry_zone=(0.92, 0.99, "Entry zone", _BUY_ENTRY_STYLE),
+    )
 
 
 def _high_tight_flag_diagram():
     y = _curve(
-        [(0, 1.0), (0.55, 2.6), (0.75, 2.42), (0.9, 2.56), (1.0, 2.95)],
-        ripple_regions=[(0.55, 0.9, 0.04)],
+        [(0, 1.0), (0.55, 2.6), (0.68, 2.44), (0.8, 2.5), (0.87, 2.58), (0.93, 2.7), (1.0, 2.95)],
+        ripple_regions=[(0.55, 0.87, 0.03)],
     )
-    return _figure(y, [(0.0, 0.55, "Explosive run-up", "rgba(255,0,0,0.08)"), (0.55, 0.9, "Tight flag", "rgba(255,165,0,0.30)")])
+    return _figure(
+        y,
+        [(0.0, 0.55, "Explosive run-up", "rgba(255,0,0,0.08)"), (0.55, 0.87, "Tight flag", "rgba(255,165,0,0.30)")],
+        marker_x_frac=0.93, marker_label="Breakout entry",
+        pivot=(2.58, 0.55, 0.93),
+        entry_zone=(0.89, 0.97, "Entry zone", _BUY_ENTRY_STYLE),
+    )
 
 
 PATTERN_DIAGRAMS = {
