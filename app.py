@@ -38,7 +38,7 @@ from scanner import (
 )
 from data.fundamentals_cache import get_earnings_dates, get_fundamentals, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
-from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
+from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans, scan_legout_signals_over_history
 from notifications import send_ntfy_alert, send_sell_alerts
 from paper_trading import (
     freeze_closed_trades as pt_freeze_closed_trades,
@@ -1738,6 +1738,61 @@ with tab_backtest:
                     f"Best performer here: **{best['pattern']}** -- expectancy {best['expectancy_r']:.2f}R "
                     f"over {int(best['trade_count'])} trades, win rate {best['win_rate']:.1f}%, "
                     f"CAGR {best['cagr']:.1f}%. Small sample sizes (especially with 'Limit to symbol') can be "
+                    "noisy -- treat this as a starting point, not proof."
+                )
+
+        st.divider()
+        st.subheader("Compare Legout scans")
+        st.caption(
+            "Backtests legout.github.io's TC2000-style scans the same way as the patterns above -- same "
+            "stop/partial/trail mechanics, same stats -- so you can see which of these actually made money "
+            "historically instead of just triggering often. Each scan already computes its match condition "
+            "across the full history internally; the Scanner tab's version just looks at the latest bar to "
+            "build today's watchlist, this uses every historical bar instead."
+        )
+        legout_compare_selected = st.multiselect(
+            "Scans to compare", list(LEGOUT_SCANS.keys()),
+            default=[k for k, v in LEGOUT_SCANS.items() if v.get("default_on")],
+            format_func=lambda k: LEGOUT_SCANS[k]["label"], key="legout_compare_selected",
+        )
+        if st.button("Compare Legout scans") and legout_compare_selected:
+            from indicators import build_close_panel, compute_rs_rating_panel
+
+            legout_compare_rows = []
+            legout_compare_progress = st.progress(0.0, text="Backtesting each scan...")
+            legout_rs_panel = None
+            if any(LEGOUT_SCANS[k]["uses_rs"] for k in legout_compare_selected):
+                close_panel = build_close_panel(bt_history)
+                if not close_panel.empty:
+                    rs_df = compute_rs_rating_panel(
+                        close_panel, settings.rs_rating.lookback_periods, settings.rs_rating.period_weights
+                    )
+                    legout_rs_panel = {sym: rs_df[sym] for sym in rs_df.columns}
+            for i, key in enumerate(legout_compare_selected):
+                spec = LEGOUT_SCANS[key]
+                legout_signals = scan_legout_signals_over_history(bt_history, key, rs_panel=legout_rs_panel)
+                legout_result = run_backtest(settings.backtest, legout_signals, side="long")
+                legout_stats = compute_stats(legout_result)
+                legout_compare_rows.append({"pattern": spec["label"], "side": "long", **legout_stats})
+                legout_compare_progress.progress(
+                    (i + 1) / len(legout_compare_selected), text=f"{spec['label']} done"
+                )
+            legout_compare_progress.empty()
+            legout_compare_df = pd.DataFrame(legout_compare_rows).sort_values(
+                "expectancy_r", ascending=False, na_position="last"
+            ).reset_index(drop=True)
+            st.session_state.legout_pattern_comparison = legout_compare_df
+
+        legout_pattern_comparison = st.session_state.get("legout_pattern_comparison")
+        if legout_pattern_comparison is not None and not legout_pattern_comparison.empty:
+            st.caption("🟢 good  🟡 mixed/borderline  🔴 weak, per-column -- ranked by expectancy (most useful historically first).")
+            st.dataframe(style_results_dataframe(legout_pattern_comparison), use_container_width=True, height=300)
+            legout_best = legout_pattern_comparison.iloc[0]
+            if pd.notna(legout_best.get("expectancy_r")) and legout_best["trade_count"] > 0:
+                st.success(
+                    f"Best performer here: **{legout_best['pattern']}** -- expectancy {legout_best['expectancy_r']:.2f}R "
+                    f"over {int(legout_best['trade_count'])} trades, win rate {legout_best['win_rate']:.1f}%, "
+                    f"CAGR {legout_best['cagr']:.1f}%. Small sample sizes (especially with 'Limit to symbol') can be "
                     "noisy -- treat this as a starting point, not proof."
                 )
 

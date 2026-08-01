@@ -417,6 +417,38 @@ SKIPPED_SCANS = {
 }
 
 
+def scan_legout_signals_over_history(history: dict, scan_key: str, rs_panel: dict | None = None) -> dict:
+    """For backtesting: run one Legout scan across *every* historical bar
+    (not just the latest) for every symbol. Mirrors
+    scanner.scan_signals_over_history()'s shape -- returns {symbol: DataFrame}
+    with a boolean `match` column aligned to that symbol's OHLCV, ready to
+    hand straight to backtest.engine.run_backtest(). Each scan function
+    already computes its condition as a full boolean Series internally
+    (run_legout_scans just discards everything but the last bar to build
+    today's watchlist) -- this keeps the whole thing instead."""
+    spec = LEGOUT_SCANS.get(scan_key)
+    if spec is None:
+        raise ValueError(f"Unknown Legout scan: {scan_key}")
+    fn = spec["fn"]
+    kwargs = dict(spec.get("kwargs", {}))
+    out = {}
+    for symbol, df in history.items():
+        if df is None or df.empty or len(df) < 60:
+            continue
+        rs = rs_panel.get(symbol) if (rs_panel and spec["uses_rs"]) else None
+        try:
+            if spec["uses_rs"]:
+                match, _sort_key = fn(df, rs=rs, **kwargs)
+            else:
+                match, _sort_key = fn(df, **kwargs)
+        except Exception:
+            continue
+        enriched = df.copy()
+        enriched["match"] = match.reindex(df.index).fillna(False)
+        out[symbol] = enriched
+    return out
+
+
 def run_legout_scans(history: dict, enabled_keys: list, rs_panel: dict | None = None) -> pd.DataFrame:
     """history: {symbol: OHLCV DataFrame}. rs_panel: optional {symbol: RS-rating Series}.
     Returns a DataFrame of the latest-bar matches across all enabled scans, one row per (symbol, scan)."""
