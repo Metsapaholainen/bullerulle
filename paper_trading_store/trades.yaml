@@ -31,3 +31,7 @@ trades:
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
   notes: ''
+- symbol: AGEN
+  decision_date: '2026-07-31'
+  setup_tag: 5 Day Gainers
+  notes: ''
