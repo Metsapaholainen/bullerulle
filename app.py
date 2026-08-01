@@ -870,14 +870,39 @@ with tab_designer:
                 bt.ep_stop_mode_override = None if ep_override_choice == "(use Stop placement above)" else ep_override_choice
 
         with col_results:
-            live_results = run_scan(settings, history, as_of=str(as_of), setup_names=[setup_choice])
+            # Fingerprint-cached: this used to re-run a full scan +
+            # scan_signals_over_history + run_backtest across the ENTIRE
+            # loaded universe on every single script rerun -- not just while
+            # actively tweaking a slider here, but on ANY widget interaction
+            # anywhere in the app, since Streamlit reruns the whole script
+            # regardless of which tab is visually active. At a handful of
+            # test symbols that's invisible; at a real ~1000+ symbol
+            # universe it's a 60-90+ second stall on every unrelated click
+            # (e.g. just switching charts in the Scanner tab). Only actually
+            # recompute when something this result depends on changed.
+            designer_history_fp = tuple(
+                sorted((sym, str(df.index[-1])) for sym, df in history.items() if not df.empty)
+            )
+            designer_fingerprint = (
+                setup_choice, str(as_of), tuple(asdict(s).items()), tuple(asdict(bt).items()), designer_history_fp,
+            )
+            if st.session_state.get("designer_fingerprint") != designer_fingerprint:
+                st.session_state.designer_live_results = run_scan(
+                    settings, history, as_of=str(as_of), setup_names=[setup_choice]
+                )
+                designer_signals = scan_signals_over_history(settings, history, setup_choice)
+                st.session_state.designer_bt_result = run_backtest(
+                    settings.backtest, designer_signals, side=spec["side"], setup_name=setup_choice
+                )
+                st.session_state.designer_fingerprint = designer_fingerprint
+            live_results = st.session_state.designer_live_results
+            result = st.session_state.designer_bt_result
+
             st.metric("Current matches", len(live_results))
             if not live_results.empty:
                 st.dataframe(live_results, use_container_width=True, height=200)
 
             st.markdown("**Live backtest (full loaded history)**")
-            signals = scan_signals_over_history(settings, history, setup_choice)
-            result = run_backtest(settings.backtest, signals, side=spec["side"], setup_name=setup_choice)
             stats = compute_stats(result)
             if stats["trade_count"] == 0:
                 st.warning(stats_summary_text(stats))
