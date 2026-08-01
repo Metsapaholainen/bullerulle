@@ -1098,6 +1098,7 @@ with tab_scanner:
                             marker_date=wrow["date"], setup_key=wsetup_key, settings=settings, row=wrow,
                             side=wrow.get("side", "long"),
                             market_cap=wrow.get("market_cap"), company_name=wrow.get("company_name"),
+                            sector=wrow.get("sector"),
                             revenue_growth_pct=wrow.get("revenue_growth_pct"), eps_growth_pct=wrow.get("eps_growth_pct"),
                         )
                     except Exception:
