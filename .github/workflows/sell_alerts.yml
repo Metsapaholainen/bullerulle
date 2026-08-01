@@ -16,6 +16,12 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Needed so this job can read/write the watchlist on the data-store
+    # branch (paper_trading_store/, config/sell_watchlist.yaml, watchlist.yaml)
+    # via github_store.py -- otherwise the auto-provided GITHUB_TOKEN below is
+    # read-only and any live-edited watchlist entry would silently fail to save.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -29,4 +35,9 @@ jobs:
         env:
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # GitHub Actions auto-provides this per-run token -- no separate PAT
+          # needed here (only the deployed Streamlit Cloud app, which isn't a
+          # GitHub-authenticated runner, needs a manually-created one; see
+          # DEPLOY.md).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python cli.py sell-alerts

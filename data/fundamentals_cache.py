@@ -48,7 +48,10 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
     """Each underlying call is independently tolerant of failure -- a symbol
     missing one field (e.g. float unavailable for some tickers) still
     returns whatever else succeeded rather than failing the whole fetch."""
-    out = {"revenue_growth_pct": None, "eps_growth_pct": None, "float_shares": None, "free_float_pct": None}
+    out = {
+        "revenue_growth_pct": None, "eps_growth_pct": None, "float_shares": None, "free_float_pct": None,
+        "market_cap": None, "company_name": None,
+    }
 
     try:
         growth = client.income_statement_growth(symbol, period="quarter", limit=1)
@@ -58,6 +61,17 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
             eps_g = row.get("growthEPS")
             out["revenue_growth_pct"] = round(rev_g * 100.0, 2) if rev_g is not None else None
             out["eps_growth_pct"] = round(eps_g * 100.0, 2) if eps_g is not None else None
+    except FMPError:
+        pass
+
+    try:
+        # /quote already carries market cap + full company name alongside
+        # price -- this is the same endpoint Live Mode uses for a fresh
+        # price, so no new FMP endpoint is needed for this.
+        quotes = client.get_quotes([symbol])
+        if quotes:
+            out["market_cap"] = quotes[0].get("marketCap")
+            out["company_name"] = quotes[0].get("name")
     except FMPError:
         pass
 
@@ -82,8 +96,9 @@ def get_fundamentals(
     client: FMPClient, symbol: str, ttl_seconds: float = DEFAULT_TTL_SECONDS, force_refresh: bool = False
 ) -> dict:
     """Returns a dict with revenue_growth_pct/eps_growth_pct/float_shares/
-    free_float_pct/insider_acquired_disposed_ratio -- any field can be None
-    if that particular FMP call failed or the data wasn't available."""
+    free_float_pct/insider_acquired_disposed_ratio/market_cap/company_name --
+    any field can be None if that particular FMP call failed or the data
+    wasn't available."""
     cached = None if force_refresh else _load_cached(symbol)
     if cached is not None and (time.time() - cached.get("fetched_at", 0)) < ttl_seconds:
         return cached["data"]

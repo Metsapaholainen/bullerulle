@@ -480,6 +480,8 @@ def run_scan(
         result_df["eps_growth_pct"] = result_df["symbol"].map(
             lambda s: fundamentals.get(s, {}).get("eps_growth_pct")
         )
+        result_df["market_cap"] = result_df["symbol"].map(lambda s: fundamentals.get(s, {}).get("market_cap"))
+        result_df["company_name"] = result_df["symbol"].map(lambda s: fundamentals.get(s, {}).get("company_name"))
         result_df["lynch_category"] = result_df["symbol"].map(
             lambda s: LYNCH_CATEGORIES[classify_lynch(fundamentals.get(s, {}))]
         )

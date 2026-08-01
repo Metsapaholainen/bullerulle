@@ -8,6 +8,7 @@ interactive when you tweak a setting.
 from __future__ import annotations
 
 import traceback
+from dataclasses import asdict
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -35,7 +36,7 @@ from scanner import (
     scan_signals_over_history,
     top_movers_by_timeframe,
 )
-from data.fundamentals_cache import get_earnings_dates, get_fundamentals_bulk
+from data.fundamentals_cache import get_earnings_dates, get_fundamentals, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans
 from notifications import send_ntfy_alert, send_sell_alerts
@@ -63,6 +64,7 @@ from settings import BacktestSettings, Settings
 from setups import SETUP_REGISTRY
 from setups.explanations import PATTERN_EXPLANATIONS
 from ui_helpers import render_stat_badges, style_results_dataframe
+from watchlist import load_watchlist as load_general_watchlist, save_watchlist as save_general_watchlist
 
 LIVE_MODE_MAX_SYMBOLS = 30
 # Auto-fetching fundamentals costs ~3 FMP calls/symbol -- fine for a
@@ -91,6 +93,12 @@ if "history" not in st.session_state:
     st.session_state.history = {}
 if "last_scan" not in st.session_state:
     st.session_state.last_scan = pd.DataFrame()
+if "watchlist" not in st.session_state:
+    # General-purpose "flag this to look at later" list -- distinct from the
+    # Sell Alerts watchlist (which carries a moving-average rule). Loaded
+    # once here so the "+ Watchlist" button next to any chart and the
+    # dedicated Watchlist tab always see the same in-session list.
+    st.session_state.watchlist = load_general_watchlist()
 
 # Apply anything queued by the Parameter Finder's "Copy to Backtest &
 # Optimizer" button *before* any widget below is instantiated -- Streamlit
@@ -111,6 +119,37 @@ def get_client():
     except FMPError as exc:
         st.error(str(exc))
         st.stop()
+
+
+def render_add_to_watchlist_button(symbol: str, key_suffix: str) -> None:
+    """A small "+ Watchlist" button dropped next to any chart -- flags the
+    currently-viewed symbol for the dedicated Watchlist tab. `key_suffix`
+    just needs to be unique per call site (e.g. the caller's own chart key)
+    so multiple chart sections on the same page don't collide on widget key."""
+    if st.button("+ Watchlist", key=f"add_watchlist_{key_suffix}"):
+        if symbol in st.session_state.watchlist:
+            st.info(f"{symbol} is already on your watchlist.")
+        else:
+            st.session_state.watchlist.append(symbol)
+            save_general_watchlist(st.session_state.watchlist)
+            st.success(f"Added {symbol} to your watchlist.")
+
+
+def _lightweight_fundamentals(symbol: str) -> dict:
+    """Cached market_cap/company_name/revenue_growth_pct/eps_growth_pct
+    lookup for chart call sites with no scan-result row already carrying
+    these fields (Browse all charts' no-match branch, Paper Trading). A
+    network hiccup here should never block the chart itself from
+    rendering, so any failure just yields an empty dict (plot_symbol
+    treats every one of these kwargs as optional)."""
+    try:
+        fd = get_fundamentals(FMPClient(), symbol)
+    except Exception:
+        return {}
+    return {
+        "market_cap": fd.get("market_cap"), "company_name": fd.get("company_name"),
+        "revenue_growth_pct": fd.get("revenue_growth_pct"), "eps_growth_pct": fd.get("eps_growth_pct"),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -253,8 +292,8 @@ if md or md_secondary:
 elif history:
     st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY/QQQ benchmarks.")
 
-tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_paper, tab_settings = st.tabs(
-    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Paper Trading", "Settings"]
+tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_paper, tab_watchlist, tab_settings = st.tabs(
+    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Paper Trading", "Watchlist", "Settings"]
 )
 
 
@@ -271,6 +310,25 @@ def slice_for_period(df: pd.DataFrame, period_label: str) -> pd.DataFrame:
     if not days or len(df) <= days:
         return df
     return df.tail(days)
+
+
+def slice_around_date(df: pd.DataFrame, period_label: str, center_date) -> pd.DataFrame:
+    """Like slice_for_period, but windows AROUND `center_date` instead of
+    the series' tail. slice_for_period is right for a signal that's always
+    near the most recent bar (every automated setup, Legout scans), but
+    Paper Trading logs decision dates that can be anywhere in the loaded
+    history -- "last N days from today" would often miss the trade's window
+    entirely for an older entry. Splits the period's day-count roughly
+    1/3 before the date, 2/3 after (so the runup into the decision and the
+    trade's aftermath both get reasonable room)."""
+    days = CHART_PERIODS.get(period_label)
+    if not days or len(df) <= days or center_date not in df.index:
+        return df
+    loc = df.index.get_loc(center_date)
+    before, after = int(days * 0.33), int(days * 0.67)
+    start = max(loc - before, 0)
+    end = min(loc + after, len(df.index))
+    return df.iloc[start:end]
 
 
 AUTO_CHART_PERIOD = "Auto (fits the pattern)"
@@ -352,12 +410,24 @@ def _hash_settings_for_cache(s: Settings) -> str:
     return str(s.to_dict())
 
 
+def _format_market_cap(value) -> str:
+    value = float(value)
+    if value >= 1e12:
+        return f"${value / 1e12:.2f}T"
+    if value >= 1e9:
+        return f"${value / 1e9:.2f}B"
+    if value >= 1e6:
+        return f"${value / 1e6:.1f}M"
+    return f"${value:,.0f}"
+
+
 @st.cache_data(show_spinner=False, hash_funcs={Settings: _hash_settings_for_cache})
 def plot_symbol(
     df: pd.DataFrame, symbol: str, marker_date=None, setup_key=None, settings=None, row=None, side="long",
     entry_date=None, entry_price=None, stop_price=None, target_price=None,
     partial_date=None, partial_price=None,
     exit_date=None, exit_price=None, exit_reason=None, r_multiple=None,
+    market_cap=None, company_name=None, revenue_growth_pct=None, eps_growth_pct=None,
 ):
     # Cached: this is a pure function of its arguments (no st.* calls, no
     # hidden global state besides static module-level constants), and it's
@@ -374,14 +444,27 @@ def plot_symbol(
     )
 
     # ADR% (average daily range, the same trailing-20-day formula used to
-    # size stops elsewhere in this app) as of the last bar currently shown --
-    # shown right in the chart title so it's visible next to every chart
-    # without touching each of this function's call sites individually.
-    chart_title = symbol
+    # size stops elsewhere in this app) plus company name/market cap/growth
+    # (when the caller has them -- not every call site fetches fundamentals)
+    # shown right in the chart title, so it's visible next to every chart
+    # without needing separate columns/panels. ADR% is colored green above
+    # a "worth trading" threshold -- a high ADR is a good sign for this
+    # trading style, not a risk flag, unlike most other volatility metrics.
+    chart_title = f"{symbol} -- {company_name}" if company_name else symbol
     if not df.empty:
         chart_adr_pct = compute_adr_pct_at(df, df.index[-1], lookback=20)
+        detail_parts = []
         if chart_adr_pct is not None:
-            chart_title = f"{symbol} -- ADR%: {chart_adr_pct:.1f}%"
+            adr_color = "#2ecc71" if chart_adr_pct >= 4.0 else "#cccccc"
+            detail_parts.append(f'<span style="color:{adr_color}">ADR%: {chart_adr_pct:.1f}%</span>')
+        if market_cap:
+            detail_parts.append(f"Mkt Cap: {_format_market_cap(market_cap)}")
+        if revenue_growth_pct is not None and pd.notna(revenue_growth_pct):
+            detail_parts.append(f"Rev Growth: {revenue_growth_pct:+.1f}%")
+        if eps_growth_pct is not None and pd.notna(eps_growth_pct):
+            detail_parts.append(f"EPS Growth: {eps_growth_pct:+.1f}%")
+        if detail_parts:
+            chart_title += "<br>" + "  |  ".join(detail_parts)
     for period, color in ((10, "orange"), (20, "blue")):
         ema = df["close"].ewm(span=period, adjust=False).mean()
         fig.add_trace(go.Scatter(x=df.index, y=ema, line=dict(width=1, color=color), name=f"EMA{period}"))
@@ -540,7 +623,7 @@ def plot_symbol(
 
     fig.update_layout(
         title=dict(text=chart_title, font=dict(size=13)),
-        height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=35, b=10),
+        height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=50, b=10),
     )
     return fig
 
@@ -821,6 +904,7 @@ with tab_scanner:
                         use_container_width=True,
                         key="approach_chart",
                     )
+                    render_add_to_watchlist_button(pick_approach, "approach")
             elif approaching_df is not None:
                 st.caption("Nothing within that distance right now -- try widening the % above.")
 
@@ -894,12 +978,39 @@ with tab_scanner:
                     "scoring, or use the Fundamentals panel below for a smaller custom list."
                 )
 
-            st.session_state.last_scan = run_scan(
+            new_scan_results = run_scan(
                 settings, scan_history, as_of=str(as_of), auto_detect=auto_detect,
                 fundamentals=scan_fundamentals,
                 earnings_dates=scan_earnings_dates, avoid_earnings_window=avoid_earnings,
                 avoid_earnings_days=int(avoid_earnings_days),
             )
+            st.session_state.last_scan = new_scan_results
+
+            if not new_scan_results.empty:
+                # Warm plot_symbol()'s cache for every match's default chart
+                # (same args the "Chart a match" picker below uses at its
+                # default settings) right now, once, so switching between
+                # matches afterwards is an instant cache hit instead of a
+                # fresh render each time.
+                warm_symbols = [s for s in new_scan_results["symbol"].unique().tolist() if s in history]
+                warm_progress = st.progress(0.0, text="Pre-building charts...")
+                for wi, wsym in enumerate(warm_symbols):
+                    wrow = new_scan_results[new_scan_results["symbol"] == wsym].iloc[0]
+                    wsetup_key = LABEL_TO_SETUP_KEY.get(wrow["setup"])
+                    try:
+                        plot_symbol(
+                            resolve_chart_df(history[wsym], AUTO_CHART_PERIOD, wrow, wsetup_key, settings), wsym,
+                            marker_date=wrow["date"], setup_key=wsetup_key, settings=settings, row=wrow,
+                            side=wrow.get("side", "long"),
+                            market_cap=wrow.get("market_cap"), company_name=wrow.get("company_name"),
+                            revenue_growth_pct=wrow.get("revenue_growth_pct"), eps_growth_pct=wrow.get("eps_growth_pct"),
+                        )
+                    except Exception:
+                        pass
+                    warm_progress.progress(
+                        (wi + 1) / len(warm_symbols), text=f"Pre-building charts... ({wi + 1}/{len(warm_symbols)})"
+                    )
+                warm_progress.empty()
         if prefilter_momentum and st.session_state.get("scan_shortlist_size") is not None:
             st.caption(f"Scanned {st.session_state.scan_shortlist_size} momentum-leading symbol(s), not the full universe.")
         results = st.session_state.last_scan
@@ -918,14 +1029,40 @@ with tab_scanner:
             # appears in the overall ranking, not alphabetically -- the
             # group containing the #1 overall match comes first.
             setup_order = results_ranked.groupby("setup")["rank"].min().sort_values().index.tolist()
+            scanner_group_clicks = {}
             for setup_label in setup_order:
                 group_df = results_ranked[results_ranked["setup"] == setup_label].dropna(axis=1, how="all")
                 st.markdown(f"**{setup_label}** ({len(group_df)} match{'es' if len(group_df) != 1 else ''})")
-                st.dataframe(group_df, use_container_width=True, height=min(80 + 35 * len(group_df), 350))
+                group_event = st.dataframe(
+                    group_df, use_container_width=True, height=min(80 + 35 * len(group_df), 350),
+                    on_select="rerun", selection_mode="single-row", key=f"scanner_group_table_{setup_label}",
+                )
+                group_clicked = group_event.selection.rows if group_event.selection else []
+                if group_clicked:
+                    scanner_group_clicks[setup_label] = group_df.iloc[group_clicked[0]]["symbol"]
+
+            # A click on any per-setup table above should drive the same
+            # "Chart a match" picker below -- write it into that selectbox's
+            # OWN session-state key before the selectbox is instantiated (a
+            # keyed widget ignores value=/index= once its key already holds
+            # a value, the same rule already established for Legout scans
+            # and Paper Trading's row-click-to-chart elsewhere in this app).
+            all_match_symbols = results["symbol"].tolist()
+            if (
+                "scanner_chart_pick" not in st.session_state
+                or st.session_state.scanner_chart_pick not in all_match_symbols
+            ):
+                st.session_state.scanner_chart_pick = all_match_symbols[0]
+            if scanner_group_clicks:
+                # Only one table can have actually fired a selection event in
+                # a given rerun (clicking a row in one table doesn't set
+                # another table's selection.rows), so any single value here is
+                # the one that was just clicked.
+                st.session_state.scanner_chart_pick = next(iter(scanner_group_clicks.values()))
 
             col_pick, col_period = st.columns([3, 1])
             with col_pick:
-                pick = st.selectbox("Chart a match", results["symbol"].tolist())
+                pick = st.selectbox("Chart a match", all_match_symbols, key="scanner_chart_pick")
             row = results[results["symbol"] == pick].iloc[0] if pick else None
             picked_setup_key = LABEL_TO_SETUP_KEY.get(row["setup"]) if row is not None else None
             with col_period:
@@ -940,10 +1077,13 @@ with tab_scanner:
                     plot_symbol(
                         resolve_chart_df(history[pick], pick_period, row, picked_setup_key, settings), pick,
                         marker_date=row["date"], setup_key=picked_setup_key, settings=settings, row=row, side=picked_side,
+                        market_cap=row.get("market_cap"), company_name=row.get("company_name"),
+                        revenue_growth_pct=row.get("revenue_growth_pct"), eps_growth_pct=row.get("eps_growth_pct"),
                     ),
                     use_container_width=True,
                     key="scanner_match_chart",
                 )
+                render_add_to_watchlist_button(pick, "scanner_match")
                 st.caption(
                     "Shaded blue/orange region = the window the detector looked at; yellow dotted line = "
                     "breakout/resistance level; green star = signal day; cyan diamond = entry; red dashed = "
@@ -1024,13 +1164,20 @@ with tab_scanner:
                         browse_df, browse_symbol, marker_date=browse_match["date"],
                         setup_key=browse_setup_key, settings=settings, row=browse_match,
                         side=browse_match.get("side", "long"),
+                        market_cap=browse_match.get("market_cap"), company_name=browse_match.get("company_name"),
+                        revenue_growth_pct=browse_match.get("revenue_growth_pct"), eps_growth_pct=browse_match.get("eps_growth_pct"),
                     ),
                     use_container_width=True,
                     key="browse_chart",
                 )
+                render_add_to_watchlist_button(browse_symbol, "browse")
                 st.success(f"This matched **{browse_match['setup']}** in the last scan.")
             else:
-                st.plotly_chart(plot_symbol(browse_df, browse_symbol), use_container_width=True, key="browse_chart")
+                browse_fund = _lightweight_fundamentals(browse_symbol)
+                st.plotly_chart(
+                    plot_symbol(browse_df, browse_symbol, **browse_fund), use_container_width=True, key="browse_chart"
+                )
+                render_add_to_watchlist_button(browse_symbol, "browse_nomatch")
                 st.caption("No pattern match for this symbol in the last scan (or you haven't run one yet).")
 
         with st.expander("🧮 Legout scans (TC2000-style, from legout.github.io)", expanded=False):
@@ -1111,6 +1258,29 @@ with tab_scanner:
 
                 st.session_state.legout_results = legout_matches
 
+                if not legout_matches.empty:
+                    # Warm plot_symbol()'s cache for every match's default
+                    # chart (same args the chart picker below uses at its
+                    # default "1 year" period) right now, once, so flipping
+                    # between matches afterwards is instant instead of a
+                    # fresh render each time.
+                    legout_warm_symbols = [s for s in legout_matches["symbol"].unique().tolist() if s in history]
+                    legout_warm_progress = st.progress(0.0, text="Pre-building charts...")
+                    for lwi, lwsym in enumerate(legout_warm_symbols):
+                        lwrow = legout_matches[legout_matches["symbol"] == lwsym].iloc[0]
+                        try:
+                            plot_symbol(
+                                slice_for_period(history[lwsym], "1 year"), lwsym, marker_date=lwrow["date"],
+                                **_lightweight_fundamentals(lwsym),
+                            )
+                        except Exception:
+                            pass
+                        legout_warm_progress.progress(
+                            (lwi + 1) / len(legout_warm_symbols),
+                            text=f"Pre-building charts... ({lwi + 1}/{len(legout_warm_symbols)})",
+                        )
+                    legout_warm_progress.empty()
+
             legout_results = st.session_state.get("legout_results")
             if legout_results is None:
                 st.info("Pick some scans above and click 'Run Legout Scans'.")
@@ -1173,10 +1343,12 @@ with tab_scanner:
                             slice_for_period(history[legout_pick], legout_period),
                             legout_pick,
                             marker_date=legout_row["date"],
+                            **_lightweight_fundamentals(legout_pick),
                         ),
                         use_container_width=True,
                         key="legout_chart",
                     )
+                    render_add_to_watchlist_button(legout_pick, "legout")
                     st.caption(f"Green dashed line = the day **{legout_row['scan']}** matched.")
 
             with st.expander("Formulas used (and what's skipped)"):
@@ -1244,6 +1416,8 @@ with tab_scanner:
                             fd = fund_data.get(sym, {})
                             fund_rows.append({
                                 "symbol": sym,
+                                "company_name": fd.get("company_name"),
+                                "market_cap": fd.get("market_cap"),
                                 "revenue_growth_pct": fd.get("revenue_growth_pct"),
                                 "eps_growth_pct": fd.get("eps_growth_pct"),
                                 "float_shares": fd.get("float_shares"),
@@ -1264,7 +1438,16 @@ with tab_scanner:
                 st.dataframe(fdf, use_container_width=True, height=300)
                 fund_pick = st.selectbox("Chart one", fdf["symbol"].tolist(), key="fund_chart_pick")
                 if fund_pick in history:
-                    st.plotly_chart(plot_symbol(history[fund_pick], fund_pick), use_container_width=True, key="fund_chart")
+                    fund_row = fdf[fdf["symbol"] == fund_pick].iloc[0]
+                    st.plotly_chart(
+                        plot_symbol(
+                            history[fund_pick], fund_pick,
+                            market_cap=fund_row.get("market_cap"), company_name=fund_row.get("company_name"),
+                            revenue_growth_pct=fund_row.get("revenue_growth_pct"), eps_growth_pct=fund_row.get("eps_growth_pct"),
+                        ),
+                        use_container_width=True, key="fund_chart",
+                    )
+                    render_add_to_watchlist_button(fund_pick, "fund")
 
             with st.expander("What do these columns mean?"):
                 st.markdown(
@@ -1449,6 +1632,7 @@ with tab_finder:
                 use_container_width=True,
                 key="param_finder_chart",
             )
+            render_add_to_watchlist_button(pf_symbol, "param_finder")
             st.caption(
                 "Shaded region = the window the detector looked at; dashed yellow line = its "
                 "breakout/resistance level; green line = the target date."
@@ -1879,7 +2063,30 @@ with tab_paper:
     if not st.session_state.paper_trades:
         st.info("No paper trades logged yet -- add one above.")
     else:
-        paper_result, paper_skipped = pt_simulate(history, st.session_state.paper_trades, st.session_state.paper_rules)
+        # Streamlit reruns this whole script on ANY widget interaction
+        # anywhere on the page, so a plain pt_simulate() call here would
+        # re-run a full backtest.engine day-loop (plus re-computing every
+        # indicator over each symbol's whole history) on every unrelated
+        # click too -- e.g. just picking which trade to chart. Recompute
+        # only when what it actually depends on changes: the trade list,
+        # the rules, or fresh data having been loaded for a symbol in use.
+        paper_symbols_in_use = {t["symbol"] for t in st.session_state.paper_trades}
+        paper_fingerprint = (
+            tuple((t["symbol"], t["decision_date"]) for t in st.session_state.paper_trades),
+            tuple(asdict(st.session_state.paper_rules).items()),
+            tuple(sorted(
+                (s, str(history[s].index[-1]))
+                for s in paper_symbols_in_use
+                if s in history and not history[s].empty
+            )),
+        )
+        if st.session_state.get("paper_fingerprint") != paper_fingerprint:
+            st.session_state.paper_result, st.session_state.paper_skipped = pt_simulate(
+                history, st.session_state.paper_trades, st.session_state.paper_rules
+            )
+            st.session_state.paper_fingerprint = paper_fingerprint
+        paper_result = st.session_state.paper_result
+        paper_skipped = st.session_state.paper_skipped
         paper_joined = pt_join_results(st.session_state.paper_trades, paper_result, paper_skipped)
 
         stats = compute_stats(paper_result)
@@ -1899,7 +2106,10 @@ with tab_paper:
 
         def _style_paper_row(row):
             status = row["status"]
-            color = {"Win": "#2ecc71", "Loss": "#e74c3c", "Open": "#f1c40f", "Not simulated": "#888888"}.get(status)
+            color = {
+                "Win": "#2ecc71", "Loss": "#e74c3c", "Open": "#f1c40f",
+                "Pending": "#3498db", "Not simulated": "#888888",
+            }.get(status)
             if color is None:
                 return [""] * len(row)
             return [f"background-color: {color}; color: black;"] * len(row)
@@ -1929,10 +2139,16 @@ with tab_paper:
         if clicked_paper_rows:
             st.session_state.paper_chart_pick = paper_labels[clicked_paper_rows[0]]
 
-        col_paper_pick, col_paper_remove = st.columns([3, 1])
+        col_paper_pick, col_paper_period, col_paper_remove = st.columns([3, 2, 1])
         with col_paper_pick:
             paper_pick_label = st.selectbox("Chart this trade", paper_labels, key="paper_chart_pick")
         paper_pick_idx = paper_labels.index(paper_pick_label)
+        with col_paper_period:
+            paper_period = st.selectbox(
+                "Chart period", list(CHART_PERIODS.keys()), index=4, key="paper_chart_period",
+                help="Windowed around the decision date, not 'today' -- an older logged trade won't get lost "
+                "off the left edge of a chart sized to the most recent bars.",
+            )
         with col_paper_remove:
             st.write("")
             if st.button("Remove this trade", key="paper_remove_btn"):
@@ -1945,11 +2161,13 @@ with tab_paper:
         if paper_pick_symbol not in history:
             st.warning(f"{paper_pick_symbol} isn't loaded -- load it from the sidebar first to see its chart.")
         else:
+            paper_decision_date = pd.Timestamp(paper_pick_row["decision_date"])
+            paper_chart_df = slice_around_date(history[paper_pick_symbol], paper_period, paper_decision_date)
             st.plotly_chart(
                 plot_symbol(
-                    history[paper_pick_symbol],
+                    paper_chart_df,
                     paper_pick_symbol,
-                    marker_date=pd.Timestamp(paper_pick_row["decision_date"]),
+                    marker_date=paper_decision_date,
                     side="long",
                     entry_date=paper_pick_row["entry_date"],
                     entry_price=paper_pick_row["entry_price"],
@@ -1959,12 +2177,106 @@ with tab_paper:
                     exit_price=paper_pick_row["exit_price"],
                     exit_reason=paper_pick_row["exit_reason"],
                     r_multiple=paper_pick_row["r_multiple"],
+                    **_lightweight_fundamentals(paper_pick_symbol),
                 ),
                 use_container_width=True,
                 key="paper_chart",
             )
+            render_add_to_watchlist_button(paper_pick_symbol, "paper")
             if paper_pick_row["notes"]:
                 st.caption(f"Notes: {paper_pick_row['notes']}")
+
+
+# --------------------------------------------------------------------------
+# Tab: Watchlist -- symbols flagged via the "+ Watchlist" button next to any
+# chart in the app. No moving-average rule attached (that's Sell Alerts) --
+# just a quick way to bookmark something to look at again, browsed the same
+# way as "Browse all charts" but scoped to just this list.
+# --------------------------------------------------------------------------
+with tab_watchlist:
+    st.subheader("Watchlist")
+    st.caption(
+        "Symbols you've flagged with the \"+ Watchlist\" button next to any chart in the app. Add/remove "
+        "below, or just browse their charts."
+    )
+
+    if not st.session_state.watchlist:
+        st.info("Nothing on your watchlist yet -- click \"+ Watchlist\" next to any chart to add it.")
+    else:
+        for i, sym in enumerate(st.session_state.watchlist):
+            col_sym, col_remove = st.columns([4, 1])
+            col_sym.write(sym)
+            if col_remove.button("Remove", key=f"watchlist_remove_{i}"):
+                st.session_state.watchlist.pop(i)
+                save_general_watchlist(st.session_state.watchlist)
+                st.rerun()
+
+    col_wl_add_sym, col_wl_add_btn = st.columns([3, 1])
+    with col_wl_add_sym:
+        watchlist_new_symbol = st.text_input("Add symbol", key="watchlist_new_symbol").strip().upper()
+    with col_wl_add_btn:
+        st.write("")
+        if st.button("Add", key="watchlist_add_btn") and watchlist_new_symbol:
+            if watchlist_new_symbol not in st.session_state.watchlist:
+                st.session_state.watchlist.append(watchlist_new_symbol)
+                save_general_watchlist(st.session_state.watchlist)
+                st.rerun()
+
+    st.divider()
+
+    watchlist_loaded_symbols = sorted(s for s in st.session_state.watchlist if s in history)
+    if not watchlist_loaded_symbols:
+        st.warning(
+            "None of your watchlist symbols are loaded yet -- load them from the sidebar first "
+            "(Custom symbols) to see their charts here."
+        )
+    else:
+        if (
+            "watchlist_symbol_select" not in st.session_state
+            or st.session_state.watchlist_symbol_select not in watchlist_loaded_symbols
+        ):
+            st.session_state.watchlist_symbol_select = watchlist_loaded_symbols[0]
+        current_wlidx = watchlist_loaded_symbols.index(st.session_state.watchlist_symbol_select)
+
+        col_wl_prev, col_wl_pick, col_wl_next, col_wl_period = st.columns([1, 3, 1, 2])
+        with col_wl_prev:
+            if st.button("⬅ Prev", key="watchlist_prev"):
+                st.session_state.watchlist_symbol_select = watchlist_loaded_symbols[(current_wlidx - 1) % len(watchlist_loaded_symbols)]
+        with col_wl_next:
+            if st.button("Next ➡", key="watchlist_next"):
+                st.session_state.watchlist_symbol_select = watchlist_loaded_symbols[(current_wlidx + 1) % len(watchlist_loaded_symbols)]
+        with col_wl_pick:
+            watchlist_symbol = st.selectbox("Symbol", watchlist_loaded_symbols, key="watchlist_symbol_select")
+        with col_wl_period:
+            watchlist_period = st.selectbox(
+                "Chart period", [AUTO_CHART_PERIOD] + list(CHART_PERIODS.keys()), index=0, key="watchlist_chart_period",
+            )
+
+        watchlist_match = None
+        if not results.empty:
+            sym_matches = results[results["symbol"] == watchlist_symbol]
+            if not sym_matches.empty:
+                watchlist_match = sym_matches.iloc[0]
+        watchlist_setup_key = LABEL_TO_SETUP_KEY.get(watchlist_match["setup"]) if watchlist_match is not None else None
+        watchlist_df = resolve_chart_df(history[watchlist_symbol], watchlist_period, watchlist_match, watchlist_setup_key, settings)
+
+        if watchlist_match is not None:
+            st.plotly_chart(
+                plot_symbol(
+                    watchlist_df, watchlist_symbol, marker_date=watchlist_match["date"],
+                    setup_key=watchlist_setup_key, settings=settings, row=watchlist_match,
+                    side=watchlist_match.get("side", "long"),
+                    market_cap=watchlist_match.get("market_cap"), company_name=watchlist_match.get("company_name"),
+                    revenue_growth_pct=watchlist_match.get("revenue_growth_pct"), eps_growth_pct=watchlist_match.get("eps_growth_pct"),
+                ),
+                use_container_width=True,
+                key="watchlist_chart",
+            )
+        else:
+            st.plotly_chart(
+                plot_symbol(watchlist_df, watchlist_symbol, **_lightweight_fundamentals(watchlist_symbol)),
+                use_container_width=True, key="watchlist_chart",
+            )
 
 
 # --------------------------------------------------------------------------

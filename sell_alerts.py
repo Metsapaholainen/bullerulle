@@ -16,28 +16,40 @@ from typing import Optional
 import pandas as pd
 import yaml
 
-DEFAULT_WATCHLIST_PATH = Path(__file__).parent / "config" / "sell_watchlist.yaml"
+import github_store
+
+GITHUB_STORE_PATH = "config/sell_watchlist.yaml"
 
 
 def load_watchlist(path: Optional[Path] = None) -> list:
-    """Returns [{"symbol": str, "ma_period": int}, ...], or [] if the file
-    doesn't exist yet (a fresh checkout with nothing configured)."""
-    path = path or DEFAULT_WATCHLIST_PATH
-    if not path.exists():
-        return []
-    with open(path, "r") as f:
-        data = yaml.safe_load(f) or {}
+    """Returns [{"symbol": str, "ma_period": int}, ...], or [] if nothing is
+    stored yet. With no explicit `path` (normal app usage), reads through
+    github_store.py -- the GitHub data-store branch when a token is
+    configured, otherwise a local fallback file -- so the watchlist
+    survives a Streamlit Cloud restart instead of living only on the
+    container's ephemeral disk. Pass an explicit `path` to read a specific
+    local file instead (used by tests)."""
+    if path is not None:
+        if not path.exists():
+            return []
+        with open(path, "r") as f:
+            data = yaml.safe_load(f) or {}
+    else:
+        raw = github_store.read_file(GITHUB_STORE_PATH)
+        data = (yaml.safe_load(raw) or {}) if raw else {}
     entries = data.get("watchlist") or []
     return [{"symbol": str(e["symbol"]).upper(), "ma_period": int(e.get("ma_period", 10))} for e in entries]
 
 
-def save_watchlist(entries: list, path: Optional[Path] = None) -> Path:
-    path = path or DEFAULT_WATCHLIST_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_watchlist(entries: list, path: Optional[Path] = None) -> None:
     normalized = [{"symbol": e["symbol"].upper(), "ma_period": int(e["ma_period"])} for e in entries]
-    with open(path, "w") as f:
-        yaml.safe_dump({"watchlist": normalized}, f, sort_keys=False)
-    return path
+    content = yaml.safe_dump({"watchlist": normalized}, sort_keys=False)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        return
+    github_store.write_file(GITHUB_STORE_PATH, content, "Update sell_watchlist.yaml")
 
 
 def check_watchlist(history: dict, watchlist: list) -> pd.DataFrame:

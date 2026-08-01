@@ -6,5 +6,6 @@ cache/*.parquet
 cache/fundamentals/
 presets_store/*.yaml
 paper_trading_store/
+watchlist.yaml
 scan_*.csv
 .streamlit/secrets.toml

@@ -25,12 +25,17 @@ it can't be done on your behalf.
    ```toml
    FMP_API_KEY = "your_actual_fmp_api_key_here"
    NTFY_TOPIC = "your_private_ntfy_sh_topic_name_here"
+   GITHUB_TOKEN = "your_fine_grained_github_pat_here"
    ```
    This is the cloud equivalent of your local `.env` file -- `data/fmp_client.py`
    already checks `st.secrets["FMP_API_KEY"]` first and only falls back to
    `.env`/environment variables when no secrets are configured, so no code
    changes are needed to switch between local and cloud. `NTFY_TOPIC` is the
    same idea for the Sell Alerts tab's push notifications (see below).
+   `GITHUB_TOKEN` is what makes Paper Trading, Sell Alerts, and the Watchlist
+   actually persist across restarts -- see "Persistent data" below for how to
+   create it. The app runs fine without it, but anything you add there will
+   be gone next time Cloud restarts the container.
 
 5. Click **Deploy**. First build takes a couple of minutes (installing
    `requirements.txt`).
@@ -46,6 +51,9 @@ it can't be done on your behalf.
   mostly use, consider defaulting to a smaller custom symbol list or a
   lower "Max universe size" (sidebar → Universe filters) rather than the
   full ~1500-symbol auto-built universe, to keep load times reasonable.
+  This only affects the OHLCV/fundamentals *caches* (fine to lose, they just
+  get re-fetched) -- Paper Trading, Sell Alerts, and the Watchlist survive
+  this restart once `GITHUB_TOKEN` is configured; see "Persistent data" below.
 - **Idle sleep**: free-tier apps go to sleep after a period of no visitors
   and take ~30-60 seconds to wake up on the next visit. This is normal.
 - **Memory**: the free tier gives roughly 1GB of RAM. A modest universe
@@ -59,6 +67,40 @@ Once deployed, load a small custom symbol list first (e.g. `NVDA,AMD,TSLA`)
 before trying the full auto-built universe, to confirm the FMP key and data
 pipeline work end-to-end on the cloud host before stressing it with a large
 universe fetch.
+
+## Persistent data: Paper Trading, Sell Alerts watchlist, and Watchlist
+
+These three features write small YAML files (`paper_trading_store/trades.yaml`,
+`paper_trading_store/rules.yaml`, `config/sell_watchlist.yaml`, `watchlist.yaml`)
+that need to survive for weeks -- but Cloud's container disk is wiped on every
+sleep/wake/restart (see "Ephemeral filesystem" above), so writing them as plain
+local files isn't enough. `github_store.py` instead commits them straight to
+this repo's own **`data-store`** branch via the GitHub API -- a dedicated
+branch, not `master`, specifically so these frequent small commits never
+trigger a Cloud auto-redeploy (Cloud only tracks `master`).
+
+Without a `GITHUB_TOKEN` configured, everything still works, but falls back to
+plain local files -- fine for local dev, not durable on Cloud.
+
+**One-time setup to make it durable on Cloud:**
+
+1. Go to **[github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)**
+   (a **fine-grained** PAT, not a classic one).
+2. **Repository access** → "Only select repositories" → pick
+   `Metsapaholainen/bullerulle`.
+3. **Permissions** → **Repository permissions** → set **Contents** to
+   **Read and write**. Leave everything else as "No access".
+4. Generate the token and copy it (you won't see it again).
+5. Paste it into Streamlit Cloud's **Advanced settings → Secrets** as
+   `GITHUB_TOKEN = "..."` (see step 4 above).
+6. Add/remove a paper trade or watchlist symbol once in the deployed app to
+   confirm it sticks: reload the page (or wait for Cloud to sleep and wake
+   back up) and check it's still there. The `data-store` branch is created
+   automatically on this first write if it doesn't exist yet.
+
+The scheduled GitHub Actions job (below) reads the live Sell Alerts watchlist
+the same way, using its own auto-provided token -- no separate PAT needed
+there.
 
 ## Sell Alerts: receiving the push notifications
 
@@ -91,13 +133,19 @@ To turn it on:
    and add two **repository secrets**:
    - `FMP_API_KEY` -- the same key you used above.
    - `NTFY_TOPIC` -- the same topic you subscribed to above.
+
+   No separate `GITHUB_TOKEN` secret is needed for this workflow -- GitHub
+   Actions auto-provides one per run, and `.github/workflows/sell_alerts.yml`
+   already grants it `contents: write` so it can read the live watchlist off
+   the `data-store` branch the same way the deployed app does.
 2. That's it -- the workflow runs automatically on its schedule. To test it
    immediately rather than waiting: go to the repo's **Actions** tab, pick
    **"Sell alerts"**, and click **"Run workflow"** (this is what
    `workflow_dispatch` in the YAML enables).
-3. Maintain the watchlist by editing `config/sell_watchlist.yaml` directly on
-   GitHub (or editing it locally and pushing) -- it's a plain committed file,
-   not something the scheduled job can write back to. Edits made in the
-   Streamlit Cloud app's Sell Alerts tab don't persist for this job, since
-   Cloud's container disk resets on every sleep/restart (see "Ephemeral
-   filesystem" above) -- only edits made locally and pushed actually stick.
+3. Maintain the watchlist from the app's Sell Alerts tab (or by editing
+   `config/sell_watchlist.yaml` on GitHub/locally and pushing) -- once
+   `GITHUB_TOKEN` is configured per "Persistent data" above, edits made in the
+   deployed app's Sell Alerts tab persist to the `data-store` branch and this
+   scheduled job picks them up on its next run. Without `GITHUB_TOKEN`
+   configured, live edits only live on Cloud's ephemeral disk and won't be
+   seen by this job -- only the committed `master` copy will.
