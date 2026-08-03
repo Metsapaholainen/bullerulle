@@ -36,13 +36,13 @@ breakout:
   breakout_volume_ratio_min: 1.5    # breakout-day volume vs 50-day average volume
   volume_avg_period: 50
   min_rs_rating: 90
-  require_rising_ema10: true        # "surf the rising 10- and 20-day moving averages"
-  require_rising_ema20: true
+  require_rising_ema10: false        # "surf the rising 10- and 20-day moving averages" -- opt-in, see settings.py
+  require_rising_ema20: false
   ema_slope_lookback_days: 5
   min_ema_slope_pct: 0.0
-  require_higher_lows: true         # "an orderly pullback ... with higher lows"
+  require_higher_lows: false        # "an orderly pullback ... with higher lows" -- opt-in
   higher_lows_tolerance_pct: 0.0
-  require_net_prior_advance: true   # prior move must be a genuine net rise, not just wide range
+  require_net_prior_advance: false  # prior move must be a genuine net rise, not just wide range -- opt-in
   min_prior_net_advance_pct: 0.0
 
 episodic_pivot:

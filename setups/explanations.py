@@ -4,12 +4,15 @@ shown in the app next to scan matches so a match isn't just a row of numbers.
 
 PATTERN_EXPLANATIONS = {
     "breakout": (
-        "Qullamaggie Breakout. A stock already made a big move -- a genuine net advance, not just "
-        "a wide/choppy range -- then paused to consolidate for a few weeks in a tight, orderly "
-        "range with higher lows, while 'surfing' its 10/20-day moving averages, which must "
-        "themselves be sloping upward (not just sat above by price). A breakout to new highs on "
-        "above-average volume means demand is stepping back in and the stock is resuming its "
-        "prior trend. This is a momentum-continuation trade, not a reversal."
+        "Qullamaggie Breakout. A stock already made a big move, then paused to consolidate for a "
+        "few weeks in a tight range while 'surfing' its 10/20-day moving average -- a sign strong "
+        "hands are holding, not dumping. A breakout to new highs on above-average volume means "
+        "demand is stepping back in and the stock is resuming its prior trend. This is a "
+        "momentum-continuation trade, not a reversal. Three optional, stricter checks are available "
+        "but off by default (Designer tab): the 10/20-day EMAs actually sloping upward (not just "
+        "sat above by price), genuinely higher lows in the base (not just a tight range), and the "
+        "prior move being a real net advance rather than just a wide/choppy range -- each cuts "
+        "match volume noticeably when turned on, so try them individually rather than all at once."
     ),
     "episodic_pivot": (
         "Episodic Pivot. A sudden, large gap up (often on an earnings surprise, guidance raise, "

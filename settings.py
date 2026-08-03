@@ -61,20 +61,25 @@ class BreakoutSettings:
     min_rs_rating: float = 90.0
     # "Surf the rising 10- and 20-day moving averages" -- being *above* the
     # EMA (require_above_ema10/20 above) isn't the same as the EMA itself
-    # actually sloping upward. These check the EMA's own trend.
-    require_rising_ema10: bool = True
-    require_rising_ema20: bool = True
+    # actually sloping upward. These check the EMA's own trend. Opt-in
+    # (default off): combined with the existing RS>=90/ADR/tight-range
+    # filters, turning all of these on by default cut real-world match
+    # rates to roughly a third of before -- available to try, not forced.
+    require_rising_ema10: bool = False
+    require_rising_ema20: bool = False
     ema_slope_lookback_days: int = 5
     min_ema_slope_pct: float = 0.0
     # "An orderly pullback and consolidation with higher lows" -- distinct
     # from max_consolidation_range_pct's tightness check, which says nothing
     # about whether the base's lows are actually ascending vs. choppy.
-    require_higher_lows: bool = True
+    # Opt-in (default off) -- see note above.
+    require_higher_lows: bool = False
     higher_lows_tolerance_pct: float = 0.0
     # The prior move must be a genuine net advance ("a big move HIGHER"),
     # not just a wide high-low range (prior_move_min_pct/max_pct above),
     # which a choppy or even net-down stock could otherwise satisfy.
-    require_net_prior_advance: bool = True
+    # Opt-in (default off) -- see note above.
+    require_net_prior_advance: bool = False
     min_prior_net_advance_pct: float = 0.0
 
 

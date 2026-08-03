@@ -38,6 +38,14 @@ breakout:
   breakout_volume_ratio_min: 1.5
   volume_avg_period: 50
   min_rs_rating: 90
+  require_rising_ema10: false        # opt-in extra tightening, off by default -- see settings.py
+  require_rising_ema20: false
+  ema_slope_lookback_days: 5
+  min_ema_slope_pct: 0.0
+  require_higher_lows: false
+  higher_lows_tolerance_pct: 0.0
+  require_net_prior_advance: false
+  min_prior_net_advance_pct: 0.0
 
 episodic_pivot:
   enabled: true
