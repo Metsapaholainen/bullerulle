@@ -1,0 +1,144 @@
+# Built-in preset: Loose Swing (aimed at ~5-10 picks per scan).
+# Same universe/patterns as Small/Mid-Cap, but every threshold pulled back
+# a step so more candidates clear each filter -- for days when the strict
+# small_mid_cap preset returns 0-2 matches and you'd rather see a wider,
+# lower-conviction shortlist than nothing. Match count still depends on
+# actual market conditions day to day -- this widens the funnel, it
+# doesn't guarantee a fixed count.
+
+universe:
+  min_price: 1.0
+  min_market_cap: 200000000        # $200M -- lower bound, down from $300M
+  max_market_cap: 15000000000      # $15B -- up from $10B
+  min_avg_dollar_volume: 15000000  # down from $20M, still solidly liquid
+  exchanges: ["NASDAQ", "NYSE", "AMEX"]
+  exclude_etf: true
+  exclude_funds: true
+  max_symbols: 1500
+  momentum_timeframes_days: [21, 63, 126, 252, 378]
+  momentum_top_pct: 6.0             # wider pre-filter funnel, up from 2.0
+
+rs_rating:
+  lookback_periods: [63, 126, 189, 252]
+  period_weights: [0.4, 0.2, 0.2, 0.2]
+
+breakout:
+  enabled: true
+  min_adr_pct: 3.5                  # down from 5.0
+  adr_lookback_days: 20
+  prior_move_lookback_days: 63
+  prior_move_min_pct: 20.0          # down from 30.0
+  prior_move_max_pct: 150.0         # up from 100.0
+  min_consolidation_days: 10
+  max_consolidation_days: 40
+  max_consolidation_range_pct: 32.0 # up from 25.0
+  require_above_ema10: true
+  require_above_ema20: true
+  ema_fast_period: 10
+  ema_slow_period: 20
+  breakout_volume_ratio_min: 1.3    # down from 1.5
+  volume_avg_period: 50
+  min_rs_rating: 80                 # down from 90
+  require_rising_ema10: false
+  require_rising_ema20: false
+  ema_slope_lookback_days: 5
+  min_ema_slope_pct: 0.0
+  require_higher_lows: false
+  higher_lows_tolerance_pct: 0.0
+  require_net_prior_advance: false
+  min_prior_net_advance_pct: 0.0
+
+episodic_pivot:
+  enabled: true
+  min_gap_pct: 7.0                  # down from 10.0
+  min_volume_ratio: 1.5             # down from 2.0
+  volume_avg_period: 50
+  lookback_base_days: 20
+  max_prior_range_pct: 28.0         # up from 20.0
+  min_price: 1.0
+  quiet_base_lookback_days: 100
+  max_quiet_base_run_pct: 55.0      # up from 40.0
+  prior_ep_lookback_days: 252
+  prior_ep_min_gap_pct: 8.0
+  max_prior_ep_count: 0
+  min_growth_pct_floor: 25.0
+  ideal_growth_pct: 100.0
+  require_growth_floor: false
+
+parabolic_short:
+  enabled: true
+  ema_period: 20
+  min_extension_adr_multiple: 2.5   # down from 3.0
+  min_run_up_pct: 70.0              # down from 100.0
+  run_up_lookback_days: 20
+  consecutive_up_days_min: 3
+
+cup_with_handle:
+  enabled: true
+  cup_lookback_days: 130
+  left_peak_days: 40
+  handle_lookback_days: 15
+  min_cup_depth_pct: 10.0           # down from 12.0
+  max_cup_depth_pct: 40.0           # up from 35.0
+  max_handle_depth_pct: 18.0        # up from 15.0
+  min_recovery_pct: 80.0            # down from 85.0
+  handle_upper_half_only: true
+  prior_uptrend_lookback_days: 60
+  min_prior_uptrend_pct: 20.0       # down from 30.0
+  breakout_volume_ratio_min: 1.2    # down from 1.4
+  volume_avg_period: 50
+
+double_bottom:
+  enabled: true
+  pattern_lookback_days: 50
+  min_depth_pct: 8.0                # down from 10.0
+  max_depth_pct: 45.0               # up from 40.0
+  max_low_difference_pct: 10.0      # up from 8.0
+  breakout_volume_ratio_min: 1.2
+  volume_avg_period: 50
+
+flat_base:
+  enabled: true
+  base_days: 25
+  max_range_pct: 18.0               # up from 15.0
+  prior_move_lookback_days: 40
+  min_prior_move_pct: 15.0          # down from 20.0
+  breakout_volume_ratio_min: 1.2
+  volume_avg_period: 50
+
+ascending_base:
+  enabled: true
+  pattern_lookback_days: 70
+  min_segment_depth_pct: 4.0        # down from 5.0
+  max_segment_depth_pct: 30.0       # up from 25.0
+  breakout_volume_ratio_min: 1.2
+  volume_avg_period: 50
+
+high_tight_flag:
+  enabled: true
+  run_up_lookback_days: 30
+  min_run_up_pct: 70.0              # down from 100.0
+  flag_lookback_days: 20
+  max_flag_depth_pct: 30.0          # up from 25.0
+  breakout_volume_ratio_min: 1.2
+  volume_avg_period: 50
+
+backtest:
+  initial_capital: 100000
+  risk_pct_per_trade: 1.0
+  commission_per_share: 0.0
+  slippage_pct: 0.1
+  stop_mode: low_of_signal_day
+  stop_adr_multiple: 1.0
+  partial_profit_r_multiple: 1.0
+  partial_profit_fraction: 0.5
+  partial_profit_max_days: 5
+  move_stop_to_breakeven_after_partial: true
+  trail_ema_period: 10
+  trail_ma_type: sma
+  max_positions: 10
+  max_position_pct_of_equity: 20.0
+  avoid_chase_adr_multiple: 1.5
+  entry_delay_days: 1
+  max_position_pct_of_avg_volume: 1.0
+  ep_stop_mode_override: null
