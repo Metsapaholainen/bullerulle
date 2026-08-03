@@ -75,11 +75,18 @@ class FMPClient:
         params = dict(params or {})
         params["apikey"] = self.api_key
         url = f"{BASE_URL}{path}"
-        last_exc: Optional[Exception] = None
+        # Tracks *why* every attempt failed, whether that was a raised
+        # exception (timeout, connection error) or a repeated 429 rate-limit
+        # response -- a 429 never raises requests.RequestException, so
+        # relying only on a caught-exception variable left this message
+        # showing a bare "None" once retries were exhausted purely from
+        # rate-limiting, with no indication of the real cause.
+        last_reason: str = "unknown error"
         for attempt in range(self.max_retries):
             try:
                 resp = self.session.get(url, params=params, timeout=30)
                 if resp.status_code == 429:
+                    last_reason = "HTTP 429 (rate limited) on every attempt -- wait a moment and try again"
                     time.sleep(self.backoff_seconds * (attempt + 1))
                     continue
                 resp.raise_for_status()
@@ -88,9 +95,9 @@ class FMPClient:
                     raise FMPError(data["Error Message"])
                 return data
             except requests.RequestException as exc:
-                last_exc = exc
+                last_reason = str(exc)
                 time.sleep(self.backoff_seconds * (attempt + 1))
-        raise FMPError(f"FMP request to {path} failed after {self.max_retries} attempts: {last_exc}")
+        raise FMPError(f"FMP request to {path} failed after {self.max_retries} attempts: {last_reason}")
 
     def screen_stocks(self, **filters: Any) -> list:
         """Wraps /company-screener. Pass FMP filter kwargs directly,
