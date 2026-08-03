@@ -59,3 +59,7 @@ trades:
   decision_date: '2026-08-02'
   setup_tag: Episodic Pivot
   notes: tradinview
+- symbol: MANH
+  decision_date: '2026-07-31'
+  setup_tag: 5 Day Gainers
+  notes: ''
