@@ -139,9 +139,7 @@ def _hash_settings_for_cache(s: Settings) -> str:
 
 
 @st.cache_data(show_spinner=False, hash_funcs={Settings: _hash_settings_for_cache})
-def _cached_load_universe(
-    settings: Settings, as_of: str, symbols: Optional[tuple], min_history_days: int, _on_progress=None
-) -> dict:
+def _cached_load_universe(settings: Settings, as_of: str, symbols: Optional[tuple], min_history_days: int) -> dict:
     """The expensive step ("Load / Refresh Data") wrapped in Streamlit's
     process-level cache -- unlike st.session_state (which resets on every
     browser refresh/new session), @st.cache_data's cache lives as long as
@@ -153,20 +151,33 @@ def _cached_load_universe(
     function first to force a genuine re-fetch (the sidebar's "Force fresh
     reload" checkbox does this).
 
-    `_on_progress` (leading underscore) is excluded from the cache key by
-    Streamlit's convention -- it still fires with real per-symbol progress
-    on an actual fetch (cache miss), but is simply never called on a cache
-    hit, since the function body doesn't run at all then."""
-    client = get_client()
-    history = load_scan_universe_history(
-        settings, as_of=as_of, client=client,
-        symbols=list(symbols) if symbols else None,
-        min_history_days=min_history_days,
-        on_progress=_on_progress,
-    )
-    start_for_benchmark = (pd.Timestamp(as_of) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
-    ensure_benchmark_loaded(history, client, start_for_benchmark, as_of)
-    ensure_benchmark_loaded(history, client, start_for_benchmark, as_of, benchmark_symbol=SECONDARY_BENCHMARK_SYMBOL)
+    The progress bar is created AND updated entirely inside this function
+    (not passed in from the caller) -- @st.cache_data replays whatever
+    st.* element calls happened during a cache-missed run when a later
+    call hits the cache, and that replay only works for elements/blocks
+    created inside the cached function itself. An earlier version created
+    the progress bar in the sidebar and mutated it via a callback passed
+    in here, which crashed on the very next cache hit ("a streamlit
+    element is called on some layout block created outside the
+    function")."""
+    progress = st.progress(0.0, text="Loading...")
+
+    def on_progress(i, n, symbol):
+        progress.progress(i / n, text=f"Loading {symbol} ({i}/{n})")
+
+    try:
+        client = get_client()
+        history = load_scan_universe_history(
+            settings, as_of=as_of, client=client,
+            symbols=list(symbols) if symbols else None,
+            min_history_days=min_history_days,
+            on_progress=on_progress,
+        )
+        start_for_benchmark = (pd.Timestamp(as_of) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
+        ensure_benchmark_loaded(history, client, start_for_benchmark, as_of)
+        ensure_benchmark_loaded(history, client, start_for_benchmark, as_of, benchmark_symbol=SECONDARY_BENCHMARK_SYMBOL)
+    finally:
+        progress.empty()
     return {
         "history": history,
         "market_direction": market_direction(history.get(DEFAULT_BENCHMARK_SYMBOL)),
@@ -362,11 +373,6 @@ with st.sidebar:
     )
     if st.button("Load / Refresh Data", type="primary"):
         symbols = [s.strip().upper() for s in custom_symbols.split(",") if s.strip()] or None
-        progress = st.progress(0.0, text="Loading...")
-
-        def on_progress(i, n, symbol):
-            progress.progress(i / n, text=f"Loading {symbol} ({i}/{n})")
-
         try:
             if force_fresh_load:
                 _cached_load_universe.clear()
@@ -375,9 +381,7 @@ with st.sidebar:
                 str(as_of),
                 tuple(symbols) if symbols else None,
                 int(history_years * 365.25),
-                _on_progress=on_progress,
             )
-            progress.empty()
             st.session_state.history = loaded["history"]
             st.session_state.market_direction = loaded["market_direction"]
             st.session_state.market_direction_secondary = loaded["market_direction_secondary"]
@@ -389,7 +393,6 @@ with st.sidebar:
             # plot_symbol exists, right before the tab bodies below.
             st.session_state._warm_charts_pending = True
         except Exception as exc:
-            progress.empty()
             st.error(f"Data load failed: {exc}")
             st.code(traceback.format_exc())
 
