@@ -131,6 +131,42 @@ def get_client():
         st.stop()
 
 
+def _hash_settings_for_cache(s: Settings) -> str:
+    """Settings is a plain (non-frozen) dataclass, so it isn't natively
+    hashable -- this gives st.cache_data a stable, content-based key so the
+    plot cache correctly invalidates only when settings actually change."""
+    return str(s.to_dict())
+
+
+@st.cache_data(show_spinner="Loading universe data (first load only -- cached after this)...",
+                hash_funcs={Settings: _hash_settings_for_cache})
+def _cached_load_universe(settings: Settings, as_of: str, symbols: Optional[tuple], min_history_days: int) -> dict:
+    """The expensive step ("Load / Refresh Data") wrapped in Streamlit's
+    process-level cache -- unlike st.session_state (which resets on every
+    browser refresh/new session), @st.cache_data's cache lives as long as
+    this server process keeps running, so a page refresh followed by the
+    exact same load (same settings/symbols/as-of date) returns instantly
+    instead of re-running the full universe screen + per-symbol history
+    fetch (which, for the full ~1500-symbol universe, is the ~30-minute
+    cost users were hitting on every refresh). Call `.clear()` on this
+    function first to force a genuine re-fetch (the sidebar's "Force fresh
+    reload" checkbox does this)."""
+    client = get_client()
+    history = load_scan_universe_history(
+        settings, as_of=as_of, client=client,
+        symbols=list(symbols) if symbols else None,
+        min_history_days=min_history_days,
+    )
+    start_for_benchmark = (pd.Timestamp(as_of) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
+    ensure_benchmark_loaded(history, client, start_for_benchmark, as_of)
+    ensure_benchmark_loaded(history, client, start_for_benchmark, as_of, benchmark_symbol=SECONDARY_BENCHMARK_SYMBOL)
+    return {
+        "history": history,
+        "market_direction": market_direction(history.get(DEFAULT_BENCHMARK_SYMBOL)),
+        "market_direction_secondary": market_direction(history.get(SECONDARY_BENCHMARK_SYMBOL)),
+    }
+
+
 def render_symbol_status_badge(symbol: str) -> None:
     """Shows whether `symbol` is already tracked somewhere in this app --
     already on the Watchlist, already logged in Paper Trading, both, or
@@ -268,38 +304,27 @@ with st.sidebar:
             + f" market cap, ${u.min_avg_dollar_volume:,.0f}+ avg $ volume."
         )
 
+    force_fresh_load = st.checkbox(
+        "Force fresh reload (ignore cache)", value=False, key="force_fresh_load",
+        help="Loading is cached for this running app session -- reloading the exact same symbols/settings/date "
+        "(e.g. after a browser refresh) normally returns instantly instead of re-fetching everything. Check this "
+        "when you know the data's actually stale (new trading day, changed universe filters that should widen "
+        "the symbol list, etc.) to force a genuine re-fetch.",
+    )
     if st.button("Load / Refresh Data", type="primary"):
         symbols = [s.strip().upper() for s in custom_symbols.split(",") if s.strip()] or None
-        progress = st.progress(0.0, text="Loading...")
-
-        def on_progress(i, n, symbol):
-            progress.progress(i / n, text=f"Loading {symbol} ({i}/{n})")
-
         try:
-            client = get_client()
-            st.session_state.history = load_scan_universe_history(
+            if force_fresh_load:
+                _cached_load_universe.clear()
+            loaded = _cached_load_universe(
                 st.session_state.settings,
-                as_of=str(as_of),
-                client=client,
-                symbols=symbols,
-                on_progress=on_progress,
-                min_history_days=int(history_years * 365.25),
+                str(as_of),
+                tuple(symbols) if symbols else None,
+                int(history_years * 365.25),
             )
-            # Also load SPY and QQQ (cheap, two extra symbols) so the
-            # market-direction banner is available without a separate step.
-            start_for_benchmark = (pd.Timestamp(as_of) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
-            ensure_benchmark_loaded(st.session_state.history, client, start_for_benchmark, str(as_of))
-            ensure_benchmark_loaded(
-                st.session_state.history, client, start_for_benchmark, str(as_of),
-                benchmark_symbol=SECONDARY_BENCHMARK_SYMBOL,
-            )
-            st.session_state.market_direction = market_direction(
-                st.session_state.history.get(DEFAULT_BENCHMARK_SYMBOL)
-            )
-            st.session_state.market_direction_secondary = market_direction(
-                st.session_state.history.get(SECONDARY_BENCHMARK_SYMBOL)
-            )
-            progress.empty()
+            st.session_state.history = loaded["history"]
+            st.session_state.market_direction = loaded["market_direction"]
+            st.session_state.market_direction_secondary = loaded["market_direction_secondary"]
             st.success(f"Loaded {len(st.session_state.history)} symbols.")
             # Charts themselves aren't warmed here -- plot_symbol() isn't
             # defined yet at this point in the script (this sidebar section
@@ -308,7 +333,6 @@ with st.sidebar:
             # plot_symbol exists, right before the tab bodies below.
             st.session_state._warm_charts_pending = True
         except Exception as exc:
-            progress.empty()
             st.error(f"Data load failed: {exc}")
             st.code(traceback.format_exc())
 
@@ -479,13 +503,6 @@ def compute_adr_pct_at(df: pd.DataFrame, date, lookback: int = 20):
     if window.empty:
         return None
     return float(((window["high"] / window["low"] - 1.0) * 100.0).mean())
-
-
-def _hash_settings_for_cache(s: Settings) -> str:
-    """Settings is a plain (non-frozen) dataclass, so it isn't natively
-    hashable -- this gives st.cache_data a stable, content-based key so the
-    plot cache correctly invalidates only when settings actually change."""
-    return str(s.to_dict())
 
 
 def _format_market_cap(value) -> str:
