@@ -861,170 +861,170 @@ with tab_designer:
     st.subheader("Interactive system designer")
     st.caption("Tweak any parameter below -- the scan matches and backtest stats to the right update immediately, using the already-loaded data (no re-fetch).")
 
-    if not history:
-        st.info("Load data from the sidebar first.")
-    else:
-        col_params, col_results = st.columns([1, 1])
+    col_params, col_results = st.columns([1, 1])
 
-        with col_params:
-            setup_choice = st.selectbox(
-                "Setup to design", list(SETUP_REGISTRY.keys()), format_func=lambda k: SETUP_REGISTRY[k]["label"], key="designer_setup"
-            )
-            spec = SETUP_REGISTRY[setup_choice]
-            s = getattr(settings, spec["settings_attr"])
+    with col_params:
+        setup_choice = st.selectbox(
+            "Setup to design", list(SETUP_REGISTRY.keys()), format_func=lambda k: SETUP_REGISTRY[k]["label"], key="designer_setup"
+        )
+        spec = SETUP_REGISTRY[setup_choice]
+        s = getattr(settings, spec["settings_attr"])
 
-            s.enabled = st.checkbox("Enabled", value=s.enabled, key=f"{setup_choice}_enabled_{st.session_state.settings_version}")
+        s.enabled = st.checkbox("Enabled", value=s.enabled, key=f"{setup_choice}_enabled_{st.session_state.settings_version}")
 
-            if setup_choice == "breakout":
-                s.min_adr_pct = st.slider("Min ADR %", 0.5, 15.0, float(s.min_adr_pct), 0.5, key=f"d_bo_adr_{st.session_state.settings_version}")
-                s.prior_move_min_pct = st.slider("Prior move min %", 0.0, 200.0, float(s.prior_move_min_pct), 5.0, key=f"d_bo_pmmin_{st.session_state.settings_version}")
-                s.prior_move_max_pct = st.slider("Prior move max %", 10.0, 500.0, float(s.prior_move_max_pct), 5.0, key=f"d_bo_pmmax_{st.session_state.settings_version}")
-                s.min_consolidation_days = st.slider("Min consolidation (days)", 3, 60, int(s.min_consolidation_days), key=f"d_bo_mincon_{st.session_state.settings_version}")
-                s.max_consolidation_days = st.slider("Max consolidation (days)", 5, 90, int(s.max_consolidation_days), key=f"d_bo_maxcon_{st.session_state.settings_version}")
-                s.max_consolidation_range_pct = st.slider("Max consolidation range %", 5.0, 80.0, float(s.max_consolidation_range_pct), 1.0, key=f"d_bo_range_{st.session_state.settings_version}")
-                s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_bo_vol_{st.session_state.settings_version}")
-                s.min_rs_rating = st.slider("Min RS rating", 1, 99, int(s.min_rs_rating), key=f"d_bo_rs_{st.session_state.settings_version}")
-                s.require_above_ema10 = st.checkbox("Require close > EMA10", value=s.require_above_ema10, key=f"d_bo_ema10_{st.session_state.settings_version}")
-                s.require_above_ema20 = st.checkbox("Require close > EMA20", value=s.require_above_ema20, key=f"d_bo_ema20_{st.session_state.settings_version}")
-                st.markdown("**\"Surf the rising moving averages\"**")
-                s.require_rising_ema10 = st.checkbox("Require EMA10 sloping up", value=s.require_rising_ema10, key=f"d_bo_risingema10_{st.session_state.settings_version}")
-                s.require_rising_ema20 = st.checkbox("Require EMA20 sloping up", value=s.require_rising_ema20, key=f"d_bo_risingema20_{st.session_state.settings_version}")
-                s.ema_slope_lookback_days = st.slider("EMA slope lookback (days)", 2, 20, int(s.ema_slope_lookback_days), key=f"d_bo_slopelb_{st.session_state.settings_version}")
-                s.min_ema_slope_pct = st.slider("Min EMA slope % over lookback", -5.0, 20.0, float(s.min_ema_slope_pct), 0.5, key=f"d_bo_slopemin_{st.session_state.settings_version}")
-                st.markdown("**\"Orderly pullback with higher lows\"**")
-                s.require_higher_lows = st.checkbox("Require higher lows in base", value=s.require_higher_lows, key=f"d_bo_higherlows_{st.session_state.settings_version}")
-                s.higher_lows_tolerance_pct = st.slider("Higher-lows tolerance %", 0.0, 15.0, float(s.higher_lows_tolerance_pct), 0.5, key=f"d_bo_hltol_{st.session_state.settings_version}")
-                st.markdown("**\"A big move higher\" (not just a wide/choppy range)**")
-                s.require_net_prior_advance = st.checkbox("Require genuine net advance", value=s.require_net_prior_advance, key=f"d_bo_netadv_{st.session_state.settings_version}")
-                s.min_prior_net_advance_pct = st.slider("Min prior net advance %", 0.0, 100.0, float(s.min_prior_net_advance_pct), 5.0, key=f"d_bo_netadvmin_{st.session_state.settings_version}")
-            elif setup_choice == "episodic_pivot":
-                s.min_gap_pct = st.slider("Min gap %", 1.0, 50.0, float(s.min_gap_pct), 1.0, key=f"d_ep_gap_{st.session_state.settings_version}")
-                s.min_volume_ratio = st.slider("Min volume ratio", 0.5, 10.0, float(s.min_volume_ratio), 0.1, key=f"d_ep_vol_{st.session_state.settings_version}")
-                s.max_prior_range_pct = st.slider("Max prior base range %", 5.0, 60.0, float(s.max_prior_range_pct), 1.0, key=f"d_ep_range_{st.session_state.settings_version}")
-                s.lookback_base_days = st.slider("Prior base lookback (days)", 5, 60, int(s.lookback_base_days), key=f"d_ep_lookback_{st.session_state.settings_version}")
-                st.markdown("**Quiet-base check** (\"gone sideways for 3-6 months or more\")")
-                s.quiet_base_lookback_days = st.slider(
-                    "Quiet-base lookback (days)", 40, 200, int(s.quiet_base_lookback_days), 10, key=f"d_ep_quiet_lb_{st.session_state.settings_version}"
-                )
-                s.max_quiet_base_run_pct = st.slider(
-                    "Max run in quiet-base window %", 10.0, 100.0, float(s.max_quiet_base_run_pct), 5.0, key=f"d_ep_quiet_run_{st.session_state.settings_version}"
-                )
-                st.markdown("**Prior-EP avoidance** (soft penalty, not a hard exclude)")
-                s.prior_ep_lookback_days = st.slider(
-                    "Prior-EP lookback (days)", 60, 378, int(s.prior_ep_lookback_days), 10, key=f"d_ep_prior_lb_{st.session_state.settings_version}"
-                )
-                s.prior_ep_min_gap_pct = st.slider(
-                    "Prior-EP min gap % (to count as \"already had one\")", 3.0, 30.0, float(s.prior_ep_min_gap_pct), 1.0,
-                    key=f"d_ep_prior_gap_{st.session_state.settings_version}",
-                )
-                st.markdown("**Growth quality** (needs fundamentals fetched -- see Scanner tab)")
-                s.min_growth_pct_floor = st.slider(
-                    "Growth floor %", 0.0, 100.0, float(s.min_growth_pct_floor), 5.0, key=f"d_ep_growth_floor_{st.session_state.settings_version}"
-                )
-                s.ideal_growth_pct = st.slider(
-                    "Ideal (\"5-star\") growth %", 25.0, 300.0, float(s.ideal_growth_pct), 25.0, key=f"d_ep_growth_ideal_{st.session_state.settings_version}"
-                )
-                s.require_growth_floor = st.checkbox(
-                    "Require growth floor as a hard filter", value=s.require_growth_floor, key=f"d_ep_require_growth_{st.session_state.settings_version}"
-                )
-                st.markdown("**Earnings beat** (\"a significant beat to analyst expectations\")")
-                s.min_eps_beat_pct_for_bonus = st.slider(
-                    "EPS beat % for bonus tier", 0.0, 100.0, float(s.min_eps_beat_pct_for_bonus), 5.0, key=f"d_ep_beatbonus_{st.session_state.settings_version}"
-                )
-                s.require_eps_beat = st.checkbox(
-                    "Require EPS beat as a hard filter (when data available)", value=s.require_eps_beat, key=f"d_ep_requirebeat_{st.session_state.settings_version}"
-                )
-            elif setup_choice == "parabolic_short":
-                s.min_extension_adr_multiple = st.slider("Min extension (x ADR)", 0.5, 10.0, float(s.min_extension_adr_multiple), 0.1, key=f"d_ps_ext_{st.session_state.settings_version}")
-                s.min_run_up_pct = st.slider("Min run-up %", 10.0, 300.0, float(s.min_run_up_pct), 5.0, key=f"d_ps_runup_{st.session_state.settings_version}")
-                s.consecutive_up_days_min = st.slider("Min consecutive up days", 1, 10, int(s.consecutive_up_days_min), key=f"d_ps_updays_{st.session_state.settings_version}")
-            elif setup_choice == "cup_with_handle":
-                s.min_cup_depth_pct = st.slider("Min cup depth %", 5.0, 50.0, float(s.min_cup_depth_pct), 1.0, key=f"d_cwh_mind_{st.session_state.settings_version}")
-                s.max_cup_depth_pct = st.slider("Max cup depth %", 10.0, 60.0, float(s.max_cup_depth_pct), 1.0, key=f"d_cwh_maxd_{st.session_state.settings_version}")
-                s.max_handle_depth_pct = st.slider("Max handle depth %", 3.0, 30.0, float(s.max_handle_depth_pct), 1.0, key=f"d_cwh_hd_{st.session_state.settings_version}")
-                s.min_recovery_pct = st.slider("Min recovery to old high %", 50.0, 100.0, float(s.min_recovery_pct), 1.0, key=f"d_cwh_rec_{st.session_state.settings_version}")
-                s.min_prior_uptrend_pct = st.slider("Min prior uptrend %", 0.0, 100.0, float(s.min_prior_uptrend_pct), 5.0, key=f"d_cwh_prior_{st.session_state.settings_version}")
-                s.handle_upper_half_only = st.checkbox("Handle must stay in upper half of cup", value=s.handle_upper_half_only, key=f"d_cwh_upperhalf_{st.session_state.settings_version}")
-                s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_cwh_vol_{st.session_state.settings_version}")
-            elif setup_choice == "double_bottom":
-                s.min_depth_pct = st.slider("Min depth %", 3.0, 40.0, float(s.min_depth_pct), 1.0, key=f"d_db_mind_{st.session_state.settings_version}")
-                s.max_depth_pct = st.slider("Max depth %", 10.0, 60.0, float(s.max_depth_pct), 1.0, key=f"d_db_maxd_{st.session_state.settings_version}")
-                s.max_low_difference_pct = st.slider("Max difference between the two lows %", 1.0, 25.0, float(s.max_low_difference_pct), 1.0, key=f"d_db_lowdiff_{st.session_state.settings_version}")
-                s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_db_vol_{st.session_state.settings_version}")
-            elif setup_choice == "flat_base":
-                s.max_range_pct = st.slider("Max base range %", 5.0, 30.0, float(s.max_range_pct), 1.0, key=f"d_fb_range_{st.session_state.settings_version}")
-                s.min_prior_move_pct = st.slider("Min prior move %", 0.0, 100.0, float(s.min_prior_move_pct), 5.0, key=f"d_fb_prior_{st.session_state.settings_version}")
-                s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_fb_vol_{st.session_state.settings_version}")
-            elif setup_choice == "ascending_base":
-                s.min_segment_depth_pct = st.slider("Min per-pullback depth %", 1.0, 20.0, float(s.min_segment_depth_pct), 1.0, key=f"d_ab_mind_{st.session_state.settings_version}")
-                s.max_segment_depth_pct = st.slider("Max per-pullback depth %", 10.0, 40.0, float(s.max_segment_depth_pct), 1.0, key=f"d_ab_maxd_{st.session_state.settings_version}")
-                s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_ab_vol_{st.session_state.settings_version}")
-            else:  # high_tight_flag
-                s.min_run_up_pct = st.slider("Min run-up %", 50.0, 300.0, float(s.min_run_up_pct), 5.0, key=f"d_htf_runup_{st.session_state.settings_version}")
-                s.max_flag_depth_pct = st.slider("Max flag depth %", 5.0, 40.0, float(s.max_flag_depth_pct), 1.0, key=f"d_htf_flag_{st.session_state.settings_version}")
-                s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_htf_vol_{st.session_state.settings_version}")
+        if setup_choice == "breakout":
+            s.min_adr_pct = st.slider("Min ADR %", 0.5, 15.0, float(s.min_adr_pct), 0.5, key=f"d_bo_adr_{st.session_state.settings_version}")
+            s.prior_move_min_pct = st.slider("Prior move min %", 0.0, 200.0, float(s.prior_move_min_pct), 5.0, key=f"d_bo_pmmin_{st.session_state.settings_version}")
+            s.prior_move_max_pct = st.slider("Prior move max %", 10.0, 500.0, float(s.prior_move_max_pct), 5.0, key=f"d_bo_pmmax_{st.session_state.settings_version}")
+            s.min_consolidation_days = st.slider("Min consolidation (days)", 3, 60, int(s.min_consolidation_days), key=f"d_bo_mincon_{st.session_state.settings_version}")
+            s.max_consolidation_days = st.slider("Max consolidation (days)", 5, 90, int(s.max_consolidation_days), key=f"d_bo_maxcon_{st.session_state.settings_version}")
+            s.max_consolidation_range_pct = st.slider("Max consolidation range %", 5.0, 80.0, float(s.max_consolidation_range_pct), 1.0, key=f"d_bo_range_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_bo_vol_{st.session_state.settings_version}")
+            s.min_rs_rating = st.slider("Min RS rating", 1, 99, int(s.min_rs_rating), key=f"d_bo_rs_{st.session_state.settings_version}")
+            s.require_above_ema10 = st.checkbox("Require close > EMA10", value=s.require_above_ema10, key=f"d_bo_ema10_{st.session_state.settings_version}")
+            s.require_above_ema20 = st.checkbox("Require close > EMA20", value=s.require_above_ema20, key=f"d_bo_ema20_{st.session_state.settings_version}")
+            st.markdown("**\"Surf the rising moving averages\"**")
+            s.require_rising_ema10 = st.checkbox("Require EMA10 sloping up", value=s.require_rising_ema10, key=f"d_bo_risingema10_{st.session_state.settings_version}")
+            s.require_rising_ema20 = st.checkbox("Require EMA20 sloping up", value=s.require_rising_ema20, key=f"d_bo_risingema20_{st.session_state.settings_version}")
+            s.ema_slope_lookback_days = st.slider("EMA slope lookback (days)", 2, 20, int(s.ema_slope_lookback_days), key=f"d_bo_slopelb_{st.session_state.settings_version}")
+            s.min_ema_slope_pct = st.slider("Min EMA slope % over lookback", -5.0, 20.0, float(s.min_ema_slope_pct), 0.5, key=f"d_bo_slopemin_{st.session_state.settings_version}")
+            st.markdown("**\"Orderly pullback with higher lows\"**")
+            s.require_higher_lows = st.checkbox("Require higher lows in base", value=s.require_higher_lows, key=f"d_bo_higherlows_{st.session_state.settings_version}")
+            s.higher_lows_tolerance_pct = st.slider("Higher-lows tolerance %", 0.0, 15.0, float(s.higher_lows_tolerance_pct), 0.5, key=f"d_bo_hltol_{st.session_state.settings_version}")
+            st.markdown("**\"A big move higher\" (not just a wide/choppy range)**")
+            s.require_net_prior_advance = st.checkbox("Require genuine net advance", value=s.require_net_prior_advance, key=f"d_bo_netadv_{st.session_state.settings_version}")
+            s.min_prior_net_advance_pct = st.slider("Min prior net advance %", 0.0, 100.0, float(s.min_prior_net_advance_pct), 5.0, key=f"d_bo_netadvmin_{st.session_state.settings_version}")
+        elif setup_choice == "episodic_pivot":
+            s.min_gap_pct = st.slider("Min gap %", 1.0, 50.0, float(s.min_gap_pct), 1.0, key=f"d_ep_gap_{st.session_state.settings_version}")
+            s.min_volume_ratio = st.slider("Min volume ratio", 0.5, 10.0, float(s.min_volume_ratio), 0.1, key=f"d_ep_vol_{st.session_state.settings_version}")
+            s.max_prior_range_pct = st.slider("Max prior base range %", 5.0, 60.0, float(s.max_prior_range_pct), 1.0, key=f"d_ep_range_{st.session_state.settings_version}")
+            s.lookback_base_days = st.slider("Prior base lookback (days)", 5, 60, int(s.lookback_base_days), key=f"d_ep_lookback_{st.session_state.settings_version}")
+            st.markdown("**Quiet-base check** (\"gone sideways for 3-6 months or more\")")
+            s.quiet_base_lookback_days = st.slider(
+                "Quiet-base lookback (days)", 40, 200, int(s.quiet_base_lookback_days), 10, key=f"d_ep_quiet_lb_{st.session_state.settings_version}"
+            )
+            s.max_quiet_base_run_pct = st.slider(
+                "Max run in quiet-base window %", 10.0, 100.0, float(s.max_quiet_base_run_pct), 5.0, key=f"d_ep_quiet_run_{st.session_state.settings_version}"
+            )
+            st.markdown("**Prior-EP avoidance** (soft penalty, not a hard exclude)")
+            s.prior_ep_lookback_days = st.slider(
+                "Prior-EP lookback (days)", 60, 378, int(s.prior_ep_lookback_days), 10, key=f"d_ep_prior_lb_{st.session_state.settings_version}"
+            )
+            s.prior_ep_min_gap_pct = st.slider(
+                "Prior-EP min gap % (to count as \"already had one\")", 3.0, 30.0, float(s.prior_ep_min_gap_pct), 1.0,
+                key=f"d_ep_prior_gap_{st.session_state.settings_version}",
+            )
+            st.markdown("**Growth quality** (needs fundamentals fetched -- see Scanner tab)")
+            s.min_growth_pct_floor = st.slider(
+                "Growth floor %", 0.0, 100.0, float(s.min_growth_pct_floor), 5.0, key=f"d_ep_growth_floor_{st.session_state.settings_version}"
+            )
+            s.ideal_growth_pct = st.slider(
+                "Ideal (\"5-star\") growth %", 25.0, 300.0, float(s.ideal_growth_pct), 25.0, key=f"d_ep_growth_ideal_{st.session_state.settings_version}"
+            )
+            s.require_growth_floor = st.checkbox(
+                "Require growth floor as a hard filter", value=s.require_growth_floor, key=f"d_ep_require_growth_{st.session_state.settings_version}"
+            )
+            st.markdown("**Earnings beat** (\"a significant beat to analyst expectations\")")
+            s.min_eps_beat_pct_for_bonus = st.slider(
+                "EPS beat % for bonus tier", 0.0, 100.0, float(s.min_eps_beat_pct_for_bonus), 5.0, key=f"d_ep_beatbonus_{st.session_state.settings_version}"
+            )
+            s.require_eps_beat = st.checkbox(
+                "Require EPS beat as a hard filter (when data available)", value=s.require_eps_beat, key=f"d_ep_requirebeat_{st.session_state.settings_version}"
+            )
+        elif setup_choice == "parabolic_short":
+            s.min_extension_adr_multiple = st.slider("Min extension (x ADR)", 0.5, 10.0, float(s.min_extension_adr_multiple), 0.1, key=f"d_ps_ext_{st.session_state.settings_version}")
+            s.min_run_up_pct = st.slider("Min run-up %", 10.0, 300.0, float(s.min_run_up_pct), 5.0, key=f"d_ps_runup_{st.session_state.settings_version}")
+            s.consecutive_up_days_min = st.slider("Min consecutive up days", 1, 10, int(s.consecutive_up_days_min), key=f"d_ps_updays_{st.session_state.settings_version}")
+        elif setup_choice == "cup_with_handle":
+            s.min_cup_depth_pct = st.slider("Min cup depth %", 5.0, 50.0, float(s.min_cup_depth_pct), 1.0, key=f"d_cwh_mind_{st.session_state.settings_version}")
+            s.max_cup_depth_pct = st.slider("Max cup depth %", 10.0, 60.0, float(s.max_cup_depth_pct), 1.0, key=f"d_cwh_maxd_{st.session_state.settings_version}")
+            s.max_handle_depth_pct = st.slider("Max handle depth %", 3.0, 30.0, float(s.max_handle_depth_pct), 1.0, key=f"d_cwh_hd_{st.session_state.settings_version}")
+            s.min_recovery_pct = st.slider("Min recovery to old high %", 50.0, 100.0, float(s.min_recovery_pct), 1.0, key=f"d_cwh_rec_{st.session_state.settings_version}")
+            s.min_prior_uptrend_pct = st.slider("Min prior uptrend %", 0.0, 100.0, float(s.min_prior_uptrend_pct), 5.0, key=f"d_cwh_prior_{st.session_state.settings_version}")
+            s.handle_upper_half_only = st.checkbox("Handle must stay in upper half of cup", value=s.handle_upper_half_only, key=f"d_cwh_upperhalf_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_cwh_vol_{st.session_state.settings_version}")
+        elif setup_choice == "double_bottom":
+            s.min_depth_pct = st.slider("Min depth %", 3.0, 40.0, float(s.min_depth_pct), 1.0, key=f"d_db_mind_{st.session_state.settings_version}")
+            s.max_depth_pct = st.slider("Max depth %", 10.0, 60.0, float(s.max_depth_pct), 1.0, key=f"d_db_maxd_{st.session_state.settings_version}")
+            s.max_low_difference_pct = st.slider("Max difference between the two lows %", 1.0, 25.0, float(s.max_low_difference_pct), 1.0, key=f"d_db_lowdiff_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_db_vol_{st.session_state.settings_version}")
+        elif setup_choice == "flat_base":
+            s.max_range_pct = st.slider("Max base range %", 5.0, 30.0, float(s.max_range_pct), 1.0, key=f"d_fb_range_{st.session_state.settings_version}")
+            s.min_prior_move_pct = st.slider("Min prior move %", 0.0, 100.0, float(s.min_prior_move_pct), 5.0, key=f"d_fb_prior_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_fb_vol_{st.session_state.settings_version}")
+        elif setup_choice == "ascending_base":
+            s.min_segment_depth_pct = st.slider("Min per-pullback depth %", 1.0, 20.0, float(s.min_segment_depth_pct), 1.0, key=f"d_ab_mind_{st.session_state.settings_version}")
+            s.max_segment_depth_pct = st.slider("Max per-pullback depth %", 10.0, 40.0, float(s.max_segment_depth_pct), 1.0, key=f"d_ab_maxd_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_ab_vol_{st.session_state.settings_version}")
+        else:  # high_tight_flag
+            s.min_run_up_pct = st.slider("Min run-up %", 50.0, 300.0, float(s.min_run_up_pct), 5.0, key=f"d_htf_runup_{st.session_state.settings_version}")
+            s.max_flag_depth_pct = st.slider("Max flag depth %", 5.0, 40.0, float(s.max_flag_depth_pct), 1.0, key=f"d_htf_flag_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_htf_vol_{st.session_state.settings_version}")
 
-            with st.expander(f"What does {spec['label']} mean?"):
-                st.write(PATTERN_EXPLANATIONS.get(setup_choice, "No explanation available."))
+        with st.expander(f"What does {spec['label']} mean?"):
+            st.write(PATTERN_EXPLANATIONS.get(setup_choice, "No explanation available."))
 
-            st.markdown("**Backtest mechanics**")
-            bt = settings.backtest
-            bt.stop_mode = st.selectbox(
-                "Stop placement", ["low_of_signal_day", "adr_multiple"], index=0 if bt.stop_mode == "low_of_signal_day" else 1,
-                format_func=lambda v: "Low of signal day (Qullamaggie's rule, capped at the ADR)" if v == "low_of_signal_day" else "Pure ADR multiple from entry",
-                key=f"d_bt_stopmode_{st.session_state.settings_version}",
+        st.markdown("**Backtest mechanics**")
+        bt = settings.backtest
+        bt.stop_mode = st.selectbox(
+            "Stop placement", ["low_of_signal_day", "adr_multiple"], index=0 if bt.stop_mode == "low_of_signal_day" else 1,
+            format_func=lambda v: "Low of signal day (Qullamaggie's rule, capped at the ADR)" if v == "low_of_signal_day" else "Pure ADR multiple from entry",
+            key=f"d_bt_stopmode_{st.session_state.settings_version}",
+        )
+        bt.risk_pct_per_trade = st.slider("Risk % per trade", 0.1, 5.0, float(bt.risk_pct_per_trade), 0.1, key=f"d_bt_risk_{st.session_state.settings_version}")
+        bt.stop_adr_multiple = st.slider(
+            "Stop distance cap (x ADR)", 0.25, 3.0, float(bt.stop_adr_multiple), 0.25, key=f"d_bt_stop_{st.session_state.settings_version}",
+            help="With 'Low of signal day', this is a cap -- the stop never ends up farther than this many ADRs away.",
+        )
+        bt.max_position_pct_of_equity = st.slider(
+            "Max position size (% of equity)", 5.0, 100.0, float(bt.max_position_pct_of_equity), 5.0, key=f"d_bt_maxpos_pct_{st.session_state.settings_version}",
+            help="\"Don't put more than 20% of your account into any one share.\"",
+        )
+        bt.avoid_chase_adr_multiple = st.slider(
+            "Anti-chase: skip if signal day's range > this many ADRs (0 = off)", 0.0, 4.0,
+            float(bt.avoid_chase_adr_multiple), 0.25, key=f"d_bt_chase_{st.session_state.settings_version}",
+        )
+        bt.partial_profit_r_multiple = st.slider("Partial profit target (R)", 0.5, 5.0, float(bt.partial_profit_r_multiple), 0.5, key=f"d_bt_ptarget_{st.session_state.settings_version}")
+        bt.partial_profit_fraction = st.slider("Partial profit fraction", 0.0, 1.0, float(bt.partial_profit_fraction), 0.05, key=f"d_bt_pfrac_{st.session_state.settings_version}")
+        bt.partial_profit_max_days = st.slider(
+            "OR take partial after this many days held, if sooner (0 = off)", 0, 20, int(bt.partial_profit_max_days),
+            key=f"d_bt_pdays_{st.session_state.settings_version}",
+            help="\"Sell 1/3 to 1/2 of the position after 3-5 days, then move the stop to break even\" -- "
+            "fires the partial even if the R-target above hasn't been hit yet.",
+        )
+        bt.move_stop_to_breakeven_after_partial = st.checkbox(
+            "Move stop to breakeven after partial", value=bt.move_stop_to_breakeven_after_partial, key=f"d_bt_breakeven_{st.session_state.settings_version}",
+        )
+        bt.trail_ma_type = st.selectbox(
+            "Trailing MA type", ["sma", "ema"], index=0 if bt.trail_ma_type == "sma" else 1, key=f"d_bt_matype_{st.session_state.settings_version}",
+        )
+        bt.trail_ema_period = st.slider("Trailing MA period", 5, 50, int(bt.trail_ema_period), key=f"d_bt_trail_{st.session_state.settings_version}")
+        bt.max_positions = st.slider("Max concurrent positions", 1, 30, int(bt.max_positions), key=f"d_bt_maxpos_{st.session_state.settings_version}")
+        bt.max_position_pct_of_avg_volume = st.slider(
+            "Max position size (% of avg daily volume, 0 = off)", 0.0, 10.0,
+            float(bt.max_position_pct_of_avg_volume), 0.5, key=f"d_bt_liq_cap_{st.session_state.settings_version}",
+            help="\"Buy no more than 1% of the average volume\" (Qullamaggie's Laws of Swing).",
+        )
+        if setup_choice == "episodic_pivot":
+            ep_override_options = ["(use Stop placement above)", "low_of_signal_day", "adr_multiple"]
+            ep_override_index = (
+                ep_override_options.index(bt.ep_stop_mode_override)
+                if bt.ep_stop_mode_override in ep_override_options
+                else 0
             )
-            bt.risk_pct_per_trade = st.slider("Risk % per trade", 0.1, 5.0, float(bt.risk_pct_per_trade), 0.1, key=f"d_bt_risk_{st.session_state.settings_version}")
-            bt.stop_adr_multiple = st.slider(
-                "Stop distance cap (x ADR)", 0.25, 3.0, float(bt.stop_adr_multiple), 0.25, key=f"d_bt_stop_{st.session_state.settings_version}",
-                help="With 'Low of signal day', this is a cap -- the stop never ends up farther than this many ADRs away.",
+            ep_override_choice = st.selectbox(
+                "EP stop override", ep_override_options, index=ep_override_index, key=f"d_bt_ep_override_{st.session_state.settings_version}",
+                help="Per the source article, EP's stop rule is worded identically to Breakout's -- \"the stop "
+                "is at the lows of the day\" -- so the default (use Stop placement above, i.e. the signal "
+                "day's whole-day low) already matches it. This is an optional alternative to experiment with, "
+                "not a correction. Only affects Episodic Pivot backtests.",
             )
-            bt.max_position_pct_of_equity = st.slider(
-                "Max position size (% of equity)", 5.0, 100.0, float(bt.max_position_pct_of_equity), 5.0, key=f"d_bt_maxpos_pct_{st.session_state.settings_version}",
-                help="\"Don't put more than 20% of your account into any one share.\"",
-            )
-            bt.avoid_chase_adr_multiple = st.slider(
-                "Anti-chase: skip if signal day's range > this many ADRs (0 = off)", 0.0, 4.0,
-                float(bt.avoid_chase_adr_multiple), 0.25, key=f"d_bt_chase_{st.session_state.settings_version}",
-            )
-            bt.partial_profit_r_multiple = st.slider("Partial profit target (R)", 0.5, 5.0, float(bt.partial_profit_r_multiple), 0.5, key=f"d_bt_ptarget_{st.session_state.settings_version}")
-            bt.partial_profit_fraction = st.slider("Partial profit fraction", 0.0, 1.0, float(bt.partial_profit_fraction), 0.05, key=f"d_bt_pfrac_{st.session_state.settings_version}")
-            bt.partial_profit_max_days = st.slider(
-                "OR take partial after this many days held, if sooner (0 = off)", 0, 20, int(bt.partial_profit_max_days),
-                key=f"d_bt_pdays_{st.session_state.settings_version}",
-                help="\"Sell 1/3 to 1/2 of the position after 3-5 days, then move the stop to break even\" -- "
-                "fires the partial even if the R-target above hasn't been hit yet.",
-            )
-            bt.move_stop_to_breakeven_after_partial = st.checkbox(
-                "Move stop to breakeven after partial", value=bt.move_stop_to_breakeven_after_partial, key=f"d_bt_breakeven_{st.session_state.settings_version}",
-            )
-            bt.trail_ma_type = st.selectbox(
-                "Trailing MA type", ["sma", "ema"], index=0 if bt.trail_ma_type == "sma" else 1, key=f"d_bt_matype_{st.session_state.settings_version}",
-            )
-            bt.trail_ema_period = st.slider("Trailing MA period", 5, 50, int(bt.trail_ema_period), key=f"d_bt_trail_{st.session_state.settings_version}")
-            bt.max_positions = st.slider("Max concurrent positions", 1, 30, int(bt.max_positions), key=f"d_bt_maxpos_{st.session_state.settings_version}")
-            bt.max_position_pct_of_avg_volume = st.slider(
-                "Max position size (% of avg daily volume, 0 = off)", 0.0, 10.0,
-                float(bt.max_position_pct_of_avg_volume), 0.5, key=f"d_bt_liq_cap_{st.session_state.settings_version}",
-                help="\"Buy no more than 1% of the average volume\" (Qullamaggie's Laws of Swing).",
-            )
-            if setup_choice == "episodic_pivot":
-                ep_override_options = ["(use Stop placement above)", "low_of_signal_day", "adr_multiple"]
-                ep_override_index = (
-                    ep_override_options.index(bt.ep_stop_mode_override)
-                    if bt.ep_stop_mode_override in ep_override_options
-                    else 0
-                )
-                ep_override_choice = st.selectbox(
-                    "EP stop override", ep_override_options, index=ep_override_index, key=f"d_bt_ep_override_{st.session_state.settings_version}",
-                    help="Per the source article, EP's stop rule is worded identically to Breakout's -- \"the stop "
-                    "is at the lows of the day\" -- so the default (use Stop placement above, i.e. the signal "
-                    "day's whole-day low) already matches it. This is an optional alternative to experiment with, "
-                    "not a correction. Only affects Episodic Pivot backtests.",
-                )
-                bt.ep_stop_mode_override = None if ep_override_choice == "(use Stop placement above)" else ep_override_choice
+            bt.ep_stop_mode_override = None if ep_override_choice == "(use Stop placement above)" else ep_override_choice
 
-        with col_results:
+    with col_results:
+        if not history:
+            st.info("Load data from the sidebar first to see live matches and backtest stats.")
+        else:
             # Fingerprint-cached: this used to re-run a full scan +
             # scan_signals_over_history + run_backtest across the ENTIRE
             # loaded universe on every single script rerun -- not just while
