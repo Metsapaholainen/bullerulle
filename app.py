@@ -400,6 +400,15 @@ with st.sidebar:
 
 settings: Settings = st.session_state.settings
 history = st.session_state.history
+# Also read here (not just inside tab_scanner's body) so it's always defined
+# for other tabs -- tab_scanner only reassigns this from st.session_state.last_scan
+# inside its own "history is loaded" branch, so anything relying on `results`
+# from elsewhere (e.g. the Watchlist tab) could see a NameError if `history`
+# started this run empty but got populated later in the same pass (e.g. the
+# Paper Trading tab's sync button fetching a symbol that's also watchlisted,
+# further down the script, executing after tab_scanner already decided to
+# skip its own results assignment).
+results = st.session_state.last_scan
 
 # CANSLIM's "M" -- market direction. O'Neil's premise: ~3 of every 4 stocks
 # follow the broad market's trend, so this is shown up top on every tab as
