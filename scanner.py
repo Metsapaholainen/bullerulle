@@ -491,6 +491,9 @@ def run_scan(
         result_df["lynch_category"] = result_df["symbol"].map(
             lambda s: LYNCH_CATEGORIES[classify_lynch(fundamentals.get(s, {}))]
         )
+        result_df["earnings_decelerating"] = result_df["symbol"].map(
+            lambda s: bool(fundamentals.get(s, {}).get("earnings_decelerating"))
+        )
     if earnings_dates:
         from fundamentals_classifier import days_to_earnings, filter_earnings_avoidance
 

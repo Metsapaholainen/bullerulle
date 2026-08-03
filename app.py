@@ -19,7 +19,7 @@ from backtest.engine import run_backtest
 from backtest.optimizer import run_grid_search, set_nested
 from backtest.stats import compute_stats, stats_summary_text
 from backtest.target_fit import find_parameters_for_target
-from data.cache import apply_live_quotes, get_history_bulk
+from data.cache import apply_live_quotes, get_history, get_history_bulk
 from data.fmp_client import FMPClient, FMPError
 from scanner import (
     DEFAULT_BENCHMARK_SYMBOL,
@@ -38,6 +38,8 @@ from scanner import (
 )
 from data.fundamentals_cache import get_earnings_dates, get_fundamentals, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
+from indicators import add_adr_pct, add_volume_stats
+from stop_calculator import compute_stop_and_size
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans, scan_legout_signals_over_history
 from notifications import send_ntfy_alert, send_sell_alerts
 from paper_trading import (
@@ -129,11 +131,31 @@ def get_client():
         st.stop()
 
 
+def render_symbol_status_badge(symbol: str) -> None:
+    """Shows whether `symbol` is already tracked somewhere in this app --
+    already on the Watchlist, already logged in Paper Trading, both, or
+    neither ("new find") -- so a fresh scan match is visually distinct from
+    something you're already watching. Called from render_add_to_watchlist_button,
+    which sits next to every chart in the app, so this shows up everywhere
+    those buttons already do without needing a separate call at each site."""
+    on_watchlist = symbol in st.session_state.get("watchlist", [])
+    in_paper_trading = any(t["symbol"] == symbol for t in st.session_state.get("paper_trades", []))
+    if on_watchlist and in_paper_trading:
+        st.caption("📋 On Watchlist  ·  📝 In Paper Trading")
+    elif on_watchlist:
+        st.caption("📋 On Watchlist")
+    elif in_paper_trading:
+        st.caption("📝 In Paper Trading")
+    else:
+        st.caption("✨ New find")
+
+
 def render_add_to_watchlist_button(symbol: str, key_suffix: str) -> None:
     """A small "+ Watchlist" button dropped next to any chart -- flags the
     currently-viewed symbol for the dedicated Watchlist tab. `key_suffix`
     just needs to be unique per call site (e.g. the caller's own chart key)
     so multiple chart sections on the same page don't collide on widget key."""
+    render_symbol_status_badge(symbol)
     if st.button("+ Watchlist", key=f"add_watchlist_{key_suffix}"):
         if symbol in st.session_state.watchlist:
             st.info(f"{symbol} is already on your watchlist.")
@@ -348,8 +370,8 @@ if md or md_secondary:
 elif history:
     st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY/QQQ benchmarks.")
 
-tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_paper, tab_watchlist, tab_settings = st.tabs(
-    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Paper Trading", "Watchlist", "Settings"]
+tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_paper, tab_watchlist, tab_stopcalc, tab_settings = st.tabs(
+    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Paper Trading", "Watchlist", "Stop Calculator", "Settings"]
 )
 
 
@@ -475,6 +497,33 @@ def _format_market_cap(value) -> str:
     if value >= 1e6:
         return f"${value / 1e6:.1f}M"
     return f"${value:,.0f}"
+
+
+@st.cache_data(show_spinner=False)
+def plot_eps_log_chart(eps_history: tuple, symbol: str):
+    """Quarterly EPS on a log y-axis -- "one inch anywhere on the scale
+    represents the same percentage change," so a steepening bar-to-bar climb
+    reads as accelerating growth and a flattening/declining climb reads as
+    decelerating growth, at a glance, the same way O'Neil describes reading
+    a log-scale price chart. `eps_history` is a tuple of (date, eps) pairs,
+    most-recent-first (tuple, not list/dict, so this cached function has a
+    hashable argument).
+
+    Log scale can't represent a zero/negative EPS quarter -- those bars are
+    dropped from the chart (noted in a caption by the caller), not silently
+    clamped to some arbitrary small positive number that would misrepresent
+    the actual loss."""
+    quarters = [(d, e) for d, e in reversed(eps_history) if e is not None and e > 0]
+    fig = go.Figure()
+    if quarters:
+        dates = [q[0] for q in quarters]
+        values = [q[1] for q in quarters]
+        fig.add_trace(go.Bar(x=dates, y=values, name="EPS", marker_color="#4C78A8"))
+    fig.update_layout(
+        yaxis_type="log", height=220, margin=dict(l=40, r=20, t=30, b=30),
+        title=f"{symbol} quarterly EPS (log scale)", showlegend=False,
+    )
+    return fig
 
 
 @st.cache_data(show_spinner=False, hash_funcs={Settings: _hash_settings_for_cache})
@@ -1592,8 +1641,14 @@ with tab_scanner:
                                 "next_earnings_date": fund_earnings.get(sym),
                                 "days_to_earnings": days_to_earnings(sym, fund_earnings, str(as_of)),
                                 "lynch_category": LYNCH_CATEGORIES[classify_lynch(fd)],
+                                "earnings_decelerating": "⚠️ Decelerating" if fd.get("earnings_decelerating") else "",
                             })
                         st.session_state.fundamentals_df = pd.DataFrame(fund_rows)
+                        # Raw per-symbol fundamentals (incl. eps_history/eps_growth_history/
+                        # earnings_deceleration_reason) kept separately so the log-scale
+                        # chart below survives a rerun (e.g. picking a different symbol)
+                        # without re-fetching.
+                        st.session_state.fundamentals_raw = fund_data
                     except Exception as exc:
                         st.error(f"Fundamentals fetch failed: {exc}")
 
@@ -1620,6 +1675,18 @@ with tab_scanner:
                     with col_fund_pt:
                         render_add_to_paper_trading_button(fund_pick, history[fund_pick].index[-1], "fund")
 
+                    fund_raw = st.session_state.get("fundamentals_raw", {}).get(fund_pick, {})
+                    eps_history = fund_raw.get("eps_history")
+                    if eps_history:
+                        if fund_raw.get("earnings_decelerating"):
+                            st.warning(f"⚠️ {fund_raw.get('earnings_deceleration_reason')}")
+                        eps_pairs = tuple((r.get("date"), r.get("eps")) for r in eps_history)
+                        st.plotly_chart(
+                            plot_eps_log_chart(eps_pairs, fund_pick), use_container_width=True, key="fund_eps_log_chart",
+                        )
+                        if any(r.get("eps") is not None and r.get("eps") <= 0 for r in eps_history):
+                            st.caption("Quarters with zero/negative EPS are omitted above -- a log scale can't represent them.")
+
             with st.expander("What do these columns mean?"):
                 st.markdown(
                     "- **revenue_growth_pct / eps_growth_pct**: latest quarter's YoY growth. Qullamaggie's own "
@@ -1634,7 +1701,11 @@ with tab_scanner:
                     "- **lynch_category**: a best-effort Peter Lynch-style tag from growth rate alone (Fast "
                     "Grower 25%+, Stalwart 8-25%, Slow Grower ~flat, Turnaround/Cyclical for negative growth) -- "
                     "simplified, since true cyclical/turnaround/asset-play calls need sector and balance-sheet "
-                    "context this app doesn't fetch."
+                    "context this app doesn't fetch.\n"
+                    "- **earnings_decelerating**: O'Neil's rule -- flagged when YoY EPS growth has fallen by "
+                    "two-thirds or more from its own prior quarter, in each of the last two quarters running "
+                    "(e.g. 100% -> 30% -> 9%). \"You may want to avoid that company\" -- shown as a warning only, "
+                    "never blocks a scan match. Chart one below to see the log-scale quarterly EPS trend."
                 )
 
 
@@ -2556,6 +2627,143 @@ with tab_watchlist:
                 )
             with col_wlt_nm_sa:
                 render_add_to_sell_alerts_button(watchlist_symbol, "watchlist_tab_nomatch")
+
+
+# --------------------------------------------------------------------------
+# Tab: Stop Calculator -- look up a single ticker and get the stop price +
+# suggested share count for placing the trade on a different platform.
+# --------------------------------------------------------------------------
+with tab_stopcalc:
+    st.subheader("Stop Loss Calculator")
+    st.caption(
+        "Look up any ticker and get the stop price + suggested share count for a trade you'll place "
+        "elsewhere. Uses the exact same stop/position-sizing formulas as Backtest & Optimizer, but with "
+        "its own fixed settings below -- independent of the Designer tab, so this doesn't drift just "
+        "because you're experimenting with sliders elsewhere."
+    )
+
+    with st.expander("Stop calculator settings (independent of the Designer tab)", expanded=False):
+        sc_col1, sc_col2 = st.columns(2)
+        with sc_col1:
+            st.session_state.sc_side = st.radio(
+                "Side", ["long", "short"], index=0 if st.session_state.get("sc_side", "long") == "long" else 1,
+                key="sc_side_radio", horizontal=True,
+            )
+            st.session_state.sc_stop_mode = st.selectbox(
+                "Stop placement", ["low_of_signal_day", "adr_multiple"],
+                index=0 if st.session_state.get("sc_stop_mode", "low_of_signal_day") == "low_of_signal_day" else 1,
+                format_func=lambda v: "Low of signal day (capped at the ADR)" if v == "low_of_signal_day" else "Pure ADR multiple from entry",
+                key="sc_stop_mode_select",
+            )
+            st.session_state.sc_stop_adr_multiple = st.slider(
+                "Stop distance cap (x ADR)", 0.25, 3.0, float(st.session_state.get("sc_stop_adr_multiple", 1.0)), 0.25,
+                key="sc_stop_adr_slider",
+            )
+        with sc_col2:
+            st.session_state.sc_equity = st.number_input(
+                "Account equity ($)", min_value=0.0, value=float(st.session_state.get("sc_equity", 100_000.0)), step=1000.0,
+                key="sc_equity_input",
+            )
+            st.session_state.sc_risk_pct = st.slider(
+                "Risk % per trade", 0.1, 5.0, float(st.session_state.get("sc_risk_pct", 1.0)), 0.1, key="sc_risk_pct_slider",
+            )
+            st.session_state.sc_max_position_pct = st.slider(
+                "Max position size (% of equity)", 5.0, 100.0, float(st.session_state.get("sc_max_position_pct", 20.0)), 5.0,
+                key="sc_max_position_pct_slider",
+            )
+            st.session_state.sc_max_liquidity_pct = st.slider(
+                "Max position (% of avg volume, 0 disables)", 0.0, 5.0, float(st.session_state.get("sc_max_liquidity_pct", 1.0)), 0.5,
+                key="sc_max_liquidity_pct_slider",
+            )
+
+    col_sc_symbol, col_sc_entry, col_sc_btn = st.columns([2, 2, 1])
+    with col_sc_symbol:
+        sc_symbol = st.text_input("Ticker", key="sc_symbol_input").strip().upper()
+    with col_sc_entry:
+        sc_entry_override = st.number_input(
+            "Entry price override (optional, 0 = use latest close)", min_value=0.0, value=0.0, step=0.01, key="sc_entry_override",
+        )
+    with col_sc_btn:
+        st.write("")
+        sc_go = st.button("Calculate", key="sc_calculate_btn")
+
+    # Computed once on "Calculate" and stashed in session_state, then always
+    # rendered from there (not gated on sc_go) -- otherwise clicking
+    # "+ Watchlist"/"+ Paper Trading" below triggers its own rerun where
+    # sc_go is False again, and the whole results section would vanish right
+    # as you click it.
+    if sc_go and sc_symbol:
+        try:
+            if sc_symbol in history and not history[sc_symbol].empty:
+                sc_df = history[sc_symbol].copy()
+            else:
+                sc_client = get_client()
+                sc_end = pd.Timestamp.today().strftime("%Y-%m-%d")
+                sc_start = (pd.Timestamp.today() - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
+                sc_df = get_history(sc_client, sc_symbol, sc_start, sc_end)
+
+            if sc_df is None or sc_df.empty or len(sc_df) < 25:
+                st.session_state.sc_computed = None
+                st.error(f"Not enough history for {sc_symbol} to compute a 20-day ADR.")
+            else:
+                sc_df = add_adr_pct(sc_df, lookback=20)
+                sc_df = add_volume_stats(sc_df, avg_period=50)
+                sc_last = sc_df.iloc[-1]
+                sc_entry_price = sc_entry_override if sc_entry_override > 0 else float(sc_last["close"])
+
+                sc_result = compute_stop_and_size(
+                    entry_price=sc_entry_price,
+                    signal_low=float(sc_last["low"]),
+                    signal_high=float(sc_last["high"]),
+                    adr_pct=float(sc_last["adr_pct_20"]) if pd.notna(sc_last["adr_pct_20"]) else 0.0,
+                    side=st.session_state.sc_side,
+                    stop_mode=st.session_state.sc_stop_mode,
+                    stop_adr_multiple=st.session_state.sc_stop_adr_multiple,
+                    risk_pct_per_trade=st.session_state.sc_risk_pct,
+                    equity=st.session_state.sc_equity,
+                    max_position_pct_of_equity=st.session_state.sc_max_position_pct,
+                    max_position_pct_of_avg_volume=st.session_state.sc_max_liquidity_pct,
+                    avg_volume=float(sc_last["vol_avg_50"]) if pd.notna(sc_last.get("vol_avg_50")) else None,
+                )
+                st.session_state.sc_computed = {
+                    "symbol": sc_symbol, "df": sc_df, "result": sc_result, "side": st.session_state.sc_side,
+                }
+        except FMPError as exc:
+            st.session_state.sc_computed = None
+            st.error(f"Couldn't fetch {sc_symbol}: {exc}")
+    elif sc_go:
+        st.warning("Enter a ticker first.")
+
+    sc_computed = st.session_state.get("sc_computed")
+    if sc_computed:
+        sc_symbol, sc_df, sc_result, sc_calc_side = (
+            sc_computed["symbol"], sc_computed["df"], sc_computed["result"], sc_computed["side"]
+        )
+        if sc_result.get("error"):
+            st.error(sc_result["error"])
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Entry price", f"${sc_result['entry_price']:.2f}")
+            m2.metric("Stop price", f"${sc_result['stop_price']:.2f}", f"-{sc_result['stop_distance_pct']:.1f}%" if sc_calc_side == "long" else f"+{sc_result['stop_distance_pct']:.1f}%")
+            m3.metric("Suggested shares", f"{sc_result['shares']:,}")
+            m4, m5, m6 = st.columns(3)
+            m4.metric("Position value", f"${sc_result['position_value']:,.0f}")
+            m5.metric("Total $ at risk", f"${sc_result['total_risk_dollars']:,.0f}")
+            m6.metric("Stop distance", f"${sc_result['stop_distance']:.2f}")
+            if sc_result["capped_by"]:
+                st.caption(f"Share count capped by: {', '.join(sc_result['capped_by'])}.")
+            if sc_result["shares"] <= 0:
+                st.warning("Suggested share count is 0 -- risk/position settings are too tight for this stop distance.")
+
+            st.plotly_chart(
+                plot_symbol(sc_df.tail(252), sc_symbol, **_lightweight_fundamentals(sc_symbol)),
+                use_container_width=True, key="sc_chart",
+            )
+            col_sc_wl, col_sc_pt = st.columns(2)
+            with col_sc_wl:
+                render_add_to_watchlist_button(sc_symbol, "stopcalc")
+            with col_sc_pt:
+                render_add_to_paper_trading_button(sc_symbol, sc_df.index[-1], "stopcalc")
 
 
 # --------------------------------------------------------------------------

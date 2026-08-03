@@ -23,6 +23,7 @@ ENDPOINTS = {
     "quote": "/quote",
     "profile": "/profile",
     "income_statement_growth": "/income-statement-growth",
+    "income_statement": "/income-statement",
     "shares_float": "/shares-float",
     "earnings_calendar": "/earnings-calendar",
     "earnings_company": "/earnings",
@@ -134,6 +135,16 @@ class FMPClient:
         `growthRevenue`/`growthEPS` (decimal fractions, e.g. 0.11 = 11%)."""
         data = self._get(
             ENDPOINTS["income_statement_growth"], params={"symbol": symbol, "period": period, "limit": limit}
+        )
+        return data if isinstance(data, list) else []
+
+    def income_statement(self, symbol: str, period: str = "quarter", limit: int = 8) -> list:
+        """Wraps /income-statement -- raw (not growth-rate) `eps`/`revenue`
+        per period, most-recent-first. Used for the log-scale earnings trend
+        chart, where income_statement_growth's decimal growth rates aren't
+        enough (need the actual EPS level to plot)."""
+        data = self._get(
+            ENDPOINTS["income_statement"], params={"symbol": symbol, "period": period, "limit": limit}
         )
         return data if isinstance(data, list) else []
 

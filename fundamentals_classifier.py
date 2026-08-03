@@ -47,6 +47,53 @@ def classify_lynch(fundamentals: dict) -> str:
     return "cyclical"
 
 
+def detect_earnings_deceleration(
+    growth_history: list, threshold_pct: float = 66.7, metric: str = "growthEPS"
+) -> dict:
+    """O'Neil's "two quarters of major earnings deceleration" rule: before
+    turning negative on a stock's earnings, look for TWO CONSECUTIVE
+    quarter-over-quarter transitions where growth fell by `threshold_pct`%
+    or more from its own prior quarter (his examples: 100% -> 30%, or 50% ->
+    15% -- both ~a two-thirds decline). A single bad quarter isn't enough;
+    only a stock is "decelerating" once BOTH of its two most recent
+    transitions clear that bar.
+
+    `growth_history` is a list of dicts, most-recent-quarter first, each
+    with a `date` and the growth fraction under `metric` (e.g. FMP's
+    `growthEPS`, a decimal like 0.35 for 35% -- NOT the *100 percentage
+    fields used elsewhere in this module, since this comes straight off
+    data/fundamentals_cache.py's raw quarterly history, not _fetch_fundamentals's
+    single-quarter summary).
+
+    A transition only counts as deceleration when the PRIOR quarter's growth
+    was itself positive -- "decline of two-thirds from the previous rate"
+    presumes coming down from a real growth rate, not comparing off a
+    negative or zero base where the math is meaningless.
+
+    Returns {"decelerating": bool, "quarters": [(date, growth_pct), ...] for
+    the 3 quarters examined, "reason": human-readable str or None}."""
+    rates = [(row.get("date"), row.get(metric)) for row in (growth_history or [])[:3]]
+    if len(rates) < 3 or any(g is None for _, g in rates):
+        return {"decelerating": False, "quarters": rates, "reason": None}
+
+    (d0, g0), (d1, g1), (d2, g2) = rates  # most-recent-first
+
+    def _decelerated(newer: float, older: float) -> bool:
+        return older > 0 and newer <= older * (1 - threshold_pct / 100.0)
+
+    transition_1 = _decelerated(g0, g1)  # most recent quarter vs the one before it
+    transition_2 = _decelerated(g1, g2)  # that quarter vs the one before it
+    decelerating = transition_1 and transition_2
+
+    reason = None
+    if decelerating:
+        reason = (
+            f"Growth decelerated {threshold_pct:.0f}%+ two quarters running: "
+            f"{g2 * 100:.0f}% ({d2}) -> {g1 * 100:.0f}% ({d1}) -> {g0 * 100:.0f}% ({d0})"
+        )
+    return {"decelerating": decelerating, "quarters": rates, "reason": reason}
+
+
 def days_to_earnings(symbol: str, earnings_dates: dict, as_of) -> Optional[int]:
     if not earnings_dates:
         return None

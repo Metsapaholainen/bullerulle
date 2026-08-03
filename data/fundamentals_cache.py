@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from data.fmp_client import FMPClient, FMPError
+from fundamentals_classifier import detect_earnings_deceleration
 
 FUNDAMENTALS_CACHE_DIR = Path(__file__).parent.parent / "cache" / "fundamentals"
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600  # 1 week -- generous but safe for quarterly-updated data
@@ -52,16 +53,42 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
         "revenue_growth_pct": None, "eps_growth_pct": None, "float_shares": None, "free_float_pct": None,
         "market_cap": None, "company_name": None, "sector": None,
         "eps_beat_pct": None, "eps_beat_date": None,
+        "eps_growth_history": None, "eps_history": None,
+        "earnings_decelerating": False, "earnings_deceleration_reason": None,
     }
 
+    quarterly_growth = None
     try:
-        growth = client.income_statement_growth(symbol, period="quarter", limit=1)
-        if growth:
-            row = growth[0]
+        quarterly_growth = client.income_statement_growth(symbol, period="quarter", limit=8)
+        if quarterly_growth:
+            row = quarterly_growth[0]
             rev_g = row.get("growthRevenue")
             eps_g = row.get("growthEPS")
             out["revenue_growth_pct"] = round(rev_g * 100.0, 2) if rev_g is not None else None
             out["eps_growth_pct"] = round(eps_g * 100.0, 2) if eps_g is not None else None
+            # Kept as raw decimal fractions (not *100) -- detect_earnings_deceleration
+            # and the log-scale chart both want the same units FMP returns.
+            out["eps_growth_history"] = [
+                {"date": r.get("date"), "growthEPS": r.get("growthEPS"), "growthRevenue": r.get("growthRevenue")}
+                for r in quarterly_growth
+            ]
+    except FMPError:
+        pass
+
+    if quarterly_growth:
+        # "Two consecutive quarters of major earnings deceleration" (O'Neil) --
+        # informational only, never blocks a scan match; see PATTERN_EXPLANATIONS
+        # / the Fundamentals panel for how this is surfaced.
+        decel = detect_earnings_deceleration(quarterly_growth)
+        out["earnings_decelerating"] = decel["decelerating"]
+        out["earnings_deceleration_reason"] = decel["reason"]
+
+    try:
+        income = client.income_statement(symbol, period="quarter", limit=8)
+        if income:
+            out["eps_history"] = [
+                {"date": r.get("date"), "eps": r.get("eps"), "revenue": r.get("revenue")} for r in income
+            ]
     except FMPError:
         pass
 
@@ -115,6 +142,7 @@ REQUIRED_FIELDS = {
     "revenue_growth_pct", "eps_growth_pct", "float_shares", "free_float_pct",
     "market_cap", "company_name", "sector", "insider_acquired_disposed_ratio",
     "eps_beat_pct", "eps_beat_date",
+    "eps_growth_history", "eps_history", "earnings_decelerating", "earnings_deceleration_reason",
 }
 
 
