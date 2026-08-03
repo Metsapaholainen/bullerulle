@@ -113,13 +113,29 @@ class FMPClient:
         return data if isinstance(data, list) else []
 
     def get_quotes(self, symbols: list) -> list:
-        """Wraps /quote for one or many symbols (comma-joined) -- used by
-        Live Mode to get each symbol's current price/day-high/day-low/volume
-        without pulling full intraday bars."""
-        if not symbols:
-            return []
-        data = self._get(ENDPOINTS["quote"], params={"symbol": ",".join(symbols)})
-        return data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+        """Wraps /quote for one or many symbols -- used by Live Mode/Sell
+        Alerts/Paper Trading sync to get each symbol's current price/day-
+        high/day-low/volume without pulling full intraday bars.
+
+        FMP's stable /quote endpoint, despite older docs suggesting
+        comma-joined batching works, silently returns an empty list for
+        ANY multi-symbol request (verified live: a single symbol returns
+        one row, two or more comma-joined returns zero rows, no error) --
+        so this issues one request per symbol instead. Each symbol is
+        independently tolerant of failure (matches this codebase's
+        get_history_bulk/get_fundamentals_bulk convention) so one bad/
+        delisted ticker doesn't blank out quotes for the rest."""
+        results = []
+        for symbol in symbols:
+            try:
+                data = self._get(ENDPOINTS["quote"], params={"symbol": symbol})
+            except FMPError:
+                continue
+            if isinstance(data, list):
+                results.extend(data)
+            elif isinstance(data, dict):
+                results.append(data)
+        return results
 
     def profile(self, symbol: str) -> dict:
         """Wraps /profile -- one company per symbol, carrying `companyName`,
