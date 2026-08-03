@@ -167,6 +167,48 @@ def _cached_load_universe(settings: Settings, as_of: str, symbols: Optional[tupl
     }
 
 
+def sync_paper_trade_prices() -> tuple:
+    """Refreshes just the symbols with a logged Paper Trade -- a handful of
+    tickers, not the whole loaded universe -- so a logged trade's current
+    price stays live without needing a full "Load / Refresh Data" (which
+    reloads everything) or "Force fresh reload" (which re-fetches the whole
+    universe). Two steps: (1) any symbol with a logged trade that isn't in
+    `history` at all yet gets its full daily history fetched from scratch
+    (mirrors Live Mode's per-symbol get_history, but self-serves instead of
+    just warning "load it from the sidebar first"); (2) every one of those
+    symbols gets a lightweight /quote merged in as today's bar (same
+    mechanism Live Mode/Sell Alerts already use for a live current price).
+
+    Returns (synced_symbols, failed_symbols). Clears the paper-trading
+    fingerprint so the next render recomputes the simulation against the
+    refreshed prices, even if today's date was already the last bar (a plain
+    date-based fingerprint wouldn't otherwise notice the price changed)."""
+    symbols = sorted({t["symbol"] for t in st.session_state.paper_trades})
+    if not symbols:
+        return [], []
+
+    client = get_client()
+    missing = [s for s in symbols if s not in st.session_state.history or st.session_state.history[s].empty]
+    failed = []
+    if missing:
+        start = (pd.Timestamp(as_of) - pd.Timedelta(days=int(history_years * 365.25))).strftime("%Y-%m-%d")
+        end = str(as_of)
+        fetched = get_history_bulk(client, missing, start, end)
+        st.session_state.history.update(fetched)
+        failed.extend(s for s in missing if s not in fetched)
+
+    quote_symbols = [s for s in symbols if s in st.session_state.history]
+    try:
+        quotes = client.get_quotes(quote_symbols)
+        st.session_state.history = apply_live_quotes(st.session_state.history, quotes)
+    except Exception:
+        failed.extend(s for s in quote_symbols if s not in failed)
+
+    st.session_state.pop("paper_fingerprint", None)
+    synced = [s for s in symbols if s not in failed]
+    return synced, failed
+
+
 def render_symbol_status_badge(symbol: str) -> None:
     """Shows whether `symbol` is already tracked somewhere in this app --
     already on the Watchlist, already logged in Paper Trading, both, or
@@ -2378,6 +2420,45 @@ with tab_paper:
     if not st.session_state.paper_trades:
         st.info("No paper trades logged yet -- add one above.")
     else:
+        col_sync_btn, col_sync_auto, col_sync_interval = st.columns([1.4, 1, 1])
+        with col_sync_btn:
+            if st.button("🔄 Sync Paper Trades now", key="pt_sync_btn"):
+                pt_synced, pt_failed = sync_paper_trade_prices()
+                if pt_synced:
+                    st.success(
+                        f"Synced current price for: {', '.join(pt_synced)}"
+                        + (f" (couldn't fetch: {', '.join(pt_failed)})" if pt_failed else "")
+                    )
+                elif pt_failed:
+                    st.error(f"Couldn't fetch: {', '.join(pt_failed)}")
+        with col_sync_auto:
+            pt_auto_sync = st.toggle("Auto-sync", value=st.session_state.get("pt_auto_sync", False), key="pt_auto_sync")
+        with col_sync_interval:
+            pt_sync_interval_label = st.selectbox(
+                "Every", ["30s", "60s", "2min", "5min"], index=1, key="pt_sync_interval_label", disabled=not pt_auto_sync,
+            )
+
+        if pt_auto_sync:
+            pt_sync_seconds = {"30s": 30, "60s": 60, "2min": 120, "5min": 300}[pt_sync_interval_label]
+
+            @st.fragment(run_every=pt_sync_seconds)
+            def _paper_auto_sync_tick():
+                # Deliberately does NOT force a full st.rerun() -- a
+                # fragment's own background timer tick isn't a normal
+                # foreground user click, and forcing a full rerun from it
+                # was observed to reset the active tab back to Scanner,
+                # which is worse than the staleness it's meant to fix. This
+                # silently keeps st.session_state.history current; the
+                # trade table/stats below pick up the refreshed prices the
+                # next time anything triggers a normal rerun (switching
+                # tabs, tweaking a slider, clicking "Sync Paper Trades now"
+                # for an immediate look).
+                sync_paper_trade_prices()
+                st.caption(f"Auto-synced in the background at {pd.Timestamp.now().strftime('%H:%M:%S')}.")
+
+            _paper_auto_sync_tick()
+            st.caption("Results below reflect the latest auto-synced prices as of your next interaction with the page.")
+
         # Streamlit reruns this whole script on ANY widget interaction
         # anywhere on the page, so a plain pt_simulate() call here would
         # re-run a full backtest.engine day-loop (plus re-computing every
