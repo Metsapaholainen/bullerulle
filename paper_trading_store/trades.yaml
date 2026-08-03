@@ -79,3 +79,7 @@ trades:
   decision_date: '2026-08-03'
   setup_tag: Gut feel / other
   notes: tradeview
+- symbol: PGY
+  decision_date: '2026-08-03'
+  setup_tag: Gut feel / other
+  notes: tradeview
