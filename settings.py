@@ -219,22 +219,29 @@ class MomentumBurstSettings:
     # --- liquidity, ours: the Qullamaggie community's usual $3M/day floor ---
     min_dollar_volume: float = 3_000_000
     # --- the 8-point quality checklist ---
+    # IMPORTANT: Bonde's published SCAN is only the three conditions above.
+    # The checklist below is how he then picks among the scan's results by
+    # eye -- it was never meant as an AND-chain. Encoded as hard gates at his
+    # descriptive values it cut a real 272-symbol universe from 44 candidates
+    # with a valid trigger day to zero. So these thresholds are set to
+    # exclude clear violations only, and the ranking work is done by
+    # setup_quality.py's star score plus this setup's own `score` column.
     # 1. "stock should have range expansion on breakout day"
     min_range_expansion_ratio: float = 1.3
     range_expansion_lookback: int = 5
     # 3. "day before breakout should be narrow range day or negative day"
     require_quiet_prior_day: bool = True
     # 4. "pre breakout there should not be many big range moves or breakdowns"
-    max_base_daily_move_pct: float = 8.0
+    max_base_daily_move_pct: float = 12.0
     # 5. "stock should have linearity in prior uptrend before the consolidation"
-    min_efficiency_ratio: float = 0.25
+    min_efficiency_ratio: float = 0.15
     prior_uptrend_lookback_days: int = 40
     # 6. "correction or consolidation should be orderly during the entire move"
     consolidation_days: int = 10          # "5 to 10 days of orderly consolidation"
-    max_consolidation_range_pct: float = 20.0
+    max_consolidation_range_pct: float = 25.0
     # 7. "volume during consolidation should be preferably orderly and lower"
     require_volume_dryup: bool = True
-    volume_dryup_ratio_max: float = 1.0
+    volume_dryup_ratio_max: float = 1.15
     # 8. "stock should close near high on breakout day"
     min_close_position_pct: float = 60.0  # close in the top 40% of the day's range
     # "avoid day 2/3 entries" -- the burst is already underway by then and the
@@ -243,7 +250,7 @@ class MomentumBurstSettings:
     # --- shared plumbing ---
     volume_avg_period: int = 50
     min_adr_pct: float = 3.0
-    min_rs_rating: float = 70.0
+    min_rs_rating: float = 60.0
     adr_lookback_days: int = 20
 
 

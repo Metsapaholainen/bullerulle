@@ -7,6 +7,7 @@ from setups import (
     flat_base,
     ascending_base,
     high_tight_flag,
+    momentum_burst,
 )
 from setups.explanations import PATTERN_EXPLANATIONS
 
@@ -59,6 +60,12 @@ SETUP_REGISTRY = {
         "label": "High Tight Flag (O'Neil)",
         "module": high_tight_flag,
         "settings_attr": "high_tight_flag",
+        "side": "long",
+    },
+    "momentum_burst": {
+        "label": "Momentum Burst (Stockbee)",
+        "module": momentum_burst,
+        "settings_attr": "momentum_burst",
         "side": "long",
     },
 }

@@ -19,6 +19,7 @@ from data.cache import get_history, get_history_bulk
 from data.universe import build_universe
 from indicators import add_core_indicators, build_close_panel, compute_rs_rating_panel
 from settings import Settings
+from setup_quality import compute_quality_panel
 from setups import SETUP_REGISTRY
 
 DEFAULT_BENCHMARK_SYMBOL = "SPY"
@@ -336,7 +337,52 @@ PATTERN_SIZE_VARIANTS = {
     "high_tight_flag": [
         {"flag_lookback_days": d, "run_up_lookback_days": int(d * 1.5)} for d in (12, 18, 25, 35)
     ],
+    # Bonde's own range is "5 to 10 days of orderly consolidation"; the wider
+    # sizes cover a stock that based for a few weeks before the burst.
+    "momentum_burst": [{"consolidation_days": d} for d in (5, 8, 10, 15, 20)],
 }
+
+# Which settings field holds "how long is this pattern's base" for each setup.
+# The quality score measures tightness, volume dry-up and linearity over that
+# window, so it has to use the window the detector actually matched on -- a
+# fixed 20-day guess would score a 6-month cup against the wrong span.
+QUALITY_BASE_DAYS_FIELD = {
+    "breakout": "max_consolidation_days",
+    "episodic_pivot": "lookback_base_days",
+    "parabolic_short": "run_up_lookback_days",
+    "cup_with_handle": "cup_lookback_days",
+    "double_bottom": "pattern_lookback_days",
+    "flat_base": "base_days",
+    "ascending_base": "pattern_lookback_days",
+    "high_tight_flag": "flag_lookback_days",
+    "momentum_burst": "consolidation_days",
+}
+
+
+def _quality_row(cache: dict, enriched, eval_date, rs_series, benchmark_close, base_days: int) -> dict:
+    """Quality/star score for one bar, memoized per base-window length.
+
+    Several setups resolve to the same window, and compute_quality_panel does
+    a dozen rolling passes over the whole frame, so recomputing it per setup
+    per symbol is the difference between a fast scan and a slow one."""
+    base_days = int(base_days or 20)
+    if base_days not in cache:
+        try:
+            cache[base_days] = compute_quality_panel(
+                enriched, rs_rating=rs_series, benchmark_close=benchmark_close, base_days=base_days,
+            )
+        except Exception:
+            cache[base_days] = None
+    panel = cache[base_days]
+    if panel is None or eval_date not in panel.index:
+        return {}
+    row = panel.loc[eval_date]
+    out = {}
+    for key, value in row.items():
+        if pd.isna(value):
+            continue
+        out[key] = int(value) if key == "stars" else float(value)
+    return out
 
 
 def build_size_variants(base_settings: Settings, setup_name: str) -> list:
@@ -408,6 +454,10 @@ def run_scan(
     )
     as_of_ts = pd.Timestamp(as_of) if as_of else close_panel.index.max()
 
+    benchmark_close = (
+        close_panel[DEFAULT_BENCHMARK_SYMBOL] if DEFAULT_BENCHMARK_SYMBOL in close_panel.columns else None
+    )
+
     rows = []
     for symbol, raw_df in history.items():
         if raw_df.empty:
@@ -419,6 +469,7 @@ def run_scan(
 
         enriched = add_core_indicators(df_upto)
         rs_series = rs_panel[symbol] if symbol in rs_panel.columns else None
+        quality_cache: dict = {}
 
         for setup_name in setup_names:
             spec = SETUP_REGISTRY[setup_name]
@@ -465,6 +516,15 @@ def run_scan(
                 # match condition uses it, so results can be prioritized by
                 # momentum/leadership across every pattern, not just Breakout.
                 record["rs_rating"] = rs_series.get(eval_date) if rs_series is not None else float("nan")
+                # Cross-setup quality score (0-6.5 -> 1-6 stars). Attached to
+                # every row so matches from different patterns are directly
+                # comparable -- each setup's own `score` column is on its own
+                # arbitrary scale and can't be ranked across setups.
+                base_days_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
+                base_days = getattr(best_variant_settings, base_days_field, None) if base_days_field else None
+                record.update(
+                    _quality_row(quality_cache, enriched, eval_date, rs_series, benchmark_close, base_days)
+                )
                 rows.append(record)
 
     if not rows:
@@ -509,13 +569,16 @@ def run_scan(
     if result_df.empty:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "score"])
 
-    # Prioritize high-momentum (high RS rating) leaders first -- O'Neil and
-    # Qullamaggie alike emphasize that these patterns matter most in market
-    # leaders, not laggards that happen to technically match. Score is the
-    # tie-breaker within the same RS tier.
+    # Rank by setup QUALITY first (the 1-6 star score), then RS, then the
+    # setup's own score as a tie-breaker. Stars lead because they're the only
+    # measure comparable ACROSS setups -- each setup's `score` is on its own
+    # arbitrary scale, so sorting by it mixed a great cup with a mediocre
+    # flat base arbitrarily. RS alone isn't enough either: a stock can be a
+    # momentum leader and still be forming a sloppy, untradeable base.
+    sort_cols = [c for c in ("stars", "quality_score", "rs_rating", "score") if c in result_df.columns]
     return (
         result_df
-        .sort_values(["rs_rating", "score"], ascending=[False, False], na_position="last")
+        .sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
         .reset_index(drop=True)
     )
 
@@ -531,6 +594,7 @@ APPROACHING_PIVOT_SETUPS = {
     "flat_base": "base_high",
     "ascending_base": "resistance",
     "high_tight_flag": "resistance",
+    "momentum_burst": "resistance",
 }
 
 
@@ -541,12 +605,21 @@ def find_approaching_pivot(
     setup_names: Optional[list] = None,
     max_distance_pct: float = 8.0,
     auto_detect: bool = True,
+    on_progress=None,
 ) -> pd.DataFrame:
     """Stocks sitting inside a *valid* base/pattern shape that haven't
     triggered the actual breakout yet -- within `max_distance_pct`% of the
     resistance/pivot level (either just under it, or just over it without
     volume having confirmed yet). Complements run_scan(), which only shows
-    the exact day a stock already broke out."""
+    the exact day a stock already broke out.
+
+    This is the slowest path in the app -- every symbol x every enabled setup
+    x every auto-detect size variant, roughly 200ms per symbol. Pass
+    `on_progress(i, n, symbol)` to drive a progress bar; without one, a large
+    universe looks like the app has frozen for several minutes. Callers
+    should also narrow `history` to a momentum shortlist first, exactly as
+    Run Scan does -- there's no point ranking bases in stocks that aren't
+    going anywhere."""
     candidates = setup_names or enabled_setup_names(settings)
     setup_names = [s for s in candidates if s in APPROACHING_PIVOT_SETUPS]
     if not setup_names or not history:
@@ -560,9 +633,15 @@ def find_approaching_pivot(
         close_panel, settings.rs_rating.lookback_periods, settings.rs_rating.period_weights
     )
     as_of_ts = pd.Timestamp(as_of) if as_of else close_panel.index.max()
+    benchmark_close = (
+        close_panel[DEFAULT_BENCHMARK_SYMBOL] if DEFAULT_BENCHMARK_SYMBOL in close_panel.columns else None
+    )
 
     rows = []
-    for symbol, raw_df in history.items():
+    total = len(history)
+    for i, (symbol, raw_df) in enumerate(history.items()):
+        if on_progress:
+            on_progress(i + 1, total, symbol)
         if raw_df.empty:
             continue
         df_upto = raw_df.loc[:as_of_ts]
@@ -573,6 +652,7 @@ def find_approaching_pivot(
         enriched = add_core_indicators(df_upto)
         rs_series = rs_panel[symbol] if symbol in rs_panel.columns else None
         close_price = enriched.loc[eval_date, "close"]
+        quality_cache: dict = {}
 
         for setup_name in setup_names:
             spec = SETUP_REGISTRY[setup_name]
@@ -612,18 +692,45 @@ def find_approaching_pivot(
                     "pivot": best["pivot"],
                     "pct_to_pivot": best["pct_to_pivot"],
                 }
+                # Carry every diagnostic the detector produced, the same way
+                # run_scan does. Without this the output had no score, no
+                # prior_move_pct, no volume_ratio -- nothing to judge a
+                # candidate by beyond its distance to the pivot.
+                record.update({k: v for k, v in best["row"].items() if k not in ("match", "shape_match")})
                 record["rs_rating"] = rs_series.get(eval_date) if rs_series is not None else float("nan")
                 for overrides in PATTERN_SIZE_VARIANTS.get(setup_name, []):
                     for field in overrides:
                         record[field] = getattr(best["variant"], field, None)
+                base_days_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
+                base_days = getattr(best["variant"], base_days_field, None) if base_days_field else None
+                record.update(
+                    _quality_row(quality_cache, enriched, eval_date, rs_series, benchmark_close, base_days)
+                )
                 rows.append(record)
 
     if not rows:
         return pd.DataFrame(columns=["symbol", "setup", "date", "close", "pivot", "pct_to_pivot"])
 
+    out = pd.DataFrame(rows)
+    # One row per symbol -- keep its best-quality setup. A stock in a valid
+    # base often satisfies several pattern definitions at once (a flat base
+    # is also an ascending base is also a breakout base), which previously
+    # listed the same ticker three or four times and crowded out others.
+    out["_abs_dist"] = out["pct_to_pivot"].abs()
+    dedupe_cols = [c for c in ("stars", "quality_score", "rs_rating") if c in out.columns]
+    out = (
+        out.sort_values(dedupe_cols + ["_abs_dist"], ascending=[False] * len(dedupe_cols) + [True],
+                        na_position="last")
+        .drop_duplicates(subset=["symbol"], keep="first")
+    )
+    # Rank by quality first, distance second. Sorting purely by distance put
+    # whatever happened to be nearest its pivot at the top regardless of
+    # whether it was worth trading -- an RS-8 stock 0.2% from a sloppy pivot
+    # outranked an RS-95 leader 2% from a textbook one.
+    sort_cols = dedupe_cols + ["_abs_dist"]
     return (
-        pd.DataFrame(rows)
-        .sort_values(by="pct_to_pivot", key=lambda s: s.abs(), ascending=True)
+        out.sort_values(sort_cols, ascending=[False] * len(dedupe_cols) + [True], na_position="last")
+        .drop(columns=["_abs_dist"])
         .reset_index(drop=True)
     )
 
@@ -632,11 +739,18 @@ def scan_signals_over_history(
     settings: Settings,
     history: dict,
     setup_name: str,
+    min_stars: int = 0,
 ) -> dict:
     """For backtesting: run one setup across *every* historical bar (not
     just the latest) for every symbol. Returns {symbol: DataFrame} where
     each DataFrame is the setup's full diagnostic output (incl. a `match`
-    boolean column) aligned to that symbol's dates."""
+    boolean column) aligned to that symbol's dates.
+
+    `min_stars` > 0 ANDs the quality score into `match`, so you can backtest
+    "only 4-star-and-better setups" and see whether the score actually
+    separates winners from losers rather than assuming it does. The score is
+    computed per bar from data available at that bar, so this stays causally
+    valid inside a historical simulation."""
     if setup_name not in SETUP_REGISTRY:
         raise ValueError(f"Unknown setup: {setup_name}")
     spec = SETUP_REGISTRY[setup_name]
@@ -648,6 +762,13 @@ def scan_signals_over_history(
         if not close_panel.empty
         else pd.DataFrame()
     )
+    benchmark_close = (
+        close_panel[DEFAULT_BENCHMARK_SYMBOL]
+        if not close_panel.empty and DEFAULT_BENCHMARK_SYMBOL in close_panel.columns
+        else None
+    )
+    base_days_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
+    base_days = getattr(setup_settings, base_days_field, None) if base_days_field else None
 
     out = {}
     for symbol, raw_df in history.items():
@@ -655,7 +776,18 @@ def scan_signals_over_history(
             continue
         enriched = add_core_indicators(raw_df)
         rs_series = rs_panel[symbol] if symbol in rs_panel.columns else None
-        out[symbol] = spec["module"].scan(enriched, setup_settings, rs_rating=rs_series).join(
+        result = spec["module"].scan(enriched, setup_settings, rs_rating=rs_series).join(
             enriched[["open", "high", "low", "close", "volume"]]
         )
+        if min_stars > 0:
+            try:
+                quality = compute_quality_panel(
+                    enriched, rs_rating=rs_series, benchmark_close=benchmark_close, base_days=base_days,
+                )
+                result["stars"] = quality["stars"].reindex(result.index)
+                result["quality_score"] = quality["quality_score"].reindex(result.index)
+                result["match"] = result["match"] & (result["stars"] >= min_stars).fillna(False)
+            except Exception:
+                pass  # scoring is a filter, never a reason to lose the signals
+        out[symbol] = result
     return out

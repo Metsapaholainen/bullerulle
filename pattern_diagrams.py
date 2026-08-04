@@ -200,6 +200,26 @@ def _high_tight_flag_diagram():
     )
 
 
+def _momentum_burst_diagram():
+    # Deliberately drawn on a shorter horizon than the other diagrams: the
+    # whole point of this setup is that the base is ~10 days and the move
+    # you're capturing is 3-5 days, not 3-5 weeks.
+    y = _curve(
+        [(0, 1.0), (0.35, 1.42), (0.5, 1.38), (0.62, 1.41), (0.72, 1.39), (0.78, 1.40), (0.82, 1.52), (1.0, 1.72)],
+        ripple_regions=[(0.5, 0.78, 0.008)],
+    )
+    return _figure(
+        y,
+        [
+            (0.0, 0.35, "Linear prior advance", "rgba(100,149,237,0.10)"),
+            (0.5, 0.78, "Quiet base, volume dries up", "rgba(100,149,237,0.20)"),
+        ],
+        marker_x_frac=0.82, marker_label="Range-expansion day",
+        pivot=(1.41, 0.5, 0.82),
+        entry_zone=(0.80, 0.88, "Stop-buy above the high", _BUY_ENTRY_STYLE),
+    )
+
+
 PATTERN_DIAGRAMS = {
     "breakout": _breakout_diagram,
     "episodic_pivot": _episodic_pivot_diagram,
@@ -209,6 +229,7 @@ PATTERN_DIAGRAMS = {
     "flat_base": _flat_base_diagram,
     "ascending_base": _ascending_base_diagram,
     "high_tight_flag": _high_tight_flag_diagram,
+    "momentum_burst": _momentum_burst_diagram,
 }
 
 

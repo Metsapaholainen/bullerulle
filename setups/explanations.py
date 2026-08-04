@@ -72,4 +72,22 @@ PATTERN_EXPLANATIONS = {
         "bigger move. It also has one of the highest failure rates of any pattern here precisely "
         "because the setup itself is so extreme -- size positions accordingly."
     ),
+    "momentum_burst": (
+        "Momentum Burst (Stockbee / Pradeep Bonde). The shortest-horizon setup here, and the one "
+        "that best matches a 3-5 day hold. The idea: most short-term moves are 3-5 day 'bursts' of "
+        "roughly 8-40%, and they start with a single range-expansion day out of a quiet, orderly "
+        "consolidation. You take day one of the burst, hold a few days, sell into strength, and "
+        "repeat -- the edge comes from doing it many times, not from catching one huge winner.\n\n"
+        "The core scan is Bonde's own, unchanged since 2014: the stock closes up at least 4% on "
+        "volume higher than the previous day. On top of that this adds his published quality "
+        "checklist -- the breakout day must expand its range and close near its high; the day "
+        "before should be a narrow or down day; the consolidation before it should be tight, quiet "
+        "(volume drying up) and free of big swings; and the prior advance should be linear rather "
+        "than choppy. It also skips a stock already up three days in a row, since by then the move "
+        "is underway and your stop sits too far below to be worth taking.\n\n"
+        "Why it's here: Qullamaggie credits Bonde as one of his own sources, and this is "
+        "essentially the same idea on a much shorter timeframe. It's also the setup in this app "
+        "that fits a premarket stop-buy best, because the trigger is simply the signal day's high. "
+        "Expect smaller wins per trade than Breakout, and many more of them."
+    ),
 }
