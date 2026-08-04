@@ -2,7 +2,10 @@
 
 Mechanics, matching how these setups are actually traded (and, where stated,
 Qullamaggie's own documented rules) rather than a naive close-to-close backtest:
-  - Entry on the next bar's open after a signal day (`entry_delay_days`).
+  - Entry either at the next bar's open (`entry_mode='next_open'`) or via a
+    resting premarket stop order just beyond the signal day's extreme
+    (`'stop_buy'`, the default) -- in which case a signal whose trigger is
+    never traded through produces NO trade at all.
   - Anti-chase filter: skip a signal if its own day's range already exceeds
     `avoid_chase_adr_multiple` ADRs ("if price change on day is more than the
     ATR, skip it").
@@ -135,6 +138,148 @@ def _apply_partial(trade: Trade, price: float, side: str, bt: BacktestSettings, 
     return cash
 
 
+@dataclass
+class EntryPlan:
+    """The outcome of deciding whether, where and with what stop to enter.
+
+    `tradeable=False` carries a human-readable `skip_reason` rather than
+    silently vanishing, so the Orders tab can explain why a scan match
+    didn't become an order instead of just omitting it."""
+    tradeable: bool
+    skip_reason: Optional[str] = None
+    entry_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    stop_distance: Optional[float] = None
+    target_price: Optional[float] = None
+    trigger_price: Optional[float] = None      # None under entry_mode="next_open"
+    limit_cap_price: Optional[float] = None    # for placing a stop-LIMIT order
+    adr_pct: Optional[float] = None
+
+
+def resolve_entry_and_stop(
+    bt: BacktestSettings,
+    side: str,
+    signal_bar,
+    entry_bar=None,
+    stop_mode: str = None,
+) -> EntryPlan:
+    """Single source of truth for "do we take this, at what price, with what stop".
+
+    Used by run_backtest (below), by the Orders tab to build real order
+    tickets, by stop_calculator, and by the chart's projected entry/stop
+    overlay -- all four previously carried their own copy of this arithmetic
+    and had already drifted apart from each other.
+
+    `entry_bar` is the bar the order is live for (the one after the signal).
+    Pass None to plan an order for a session that hasn't happened yet: the
+    trigger, stop and size are all knowable in advance, only the fill isn't,
+    so the returned plan assumes a fill at the trigger.
+    """
+    stop_mode = stop_mode or bt.stop_mode
+    sign = 1.0 if side == "long" else -1.0
+
+    adr_pct = signal_bar.get("adr_pct") if hasattr(signal_bar, "get") else signal_bar["adr_pct"]
+    if adr_pct is None or not np.isfinite(adr_pct) or adr_pct <= 0:
+        return EntryPlan(False, "no ADR data")
+
+    # Anti-chase: a pure property of the signal day, independent of the fill.
+    # "If price change on day is more than the ATR, skip it."
+    if bt.avoid_chase_adr_multiple > 0:
+        signal_range_pct = (signal_bar["high"] / signal_bar["low"] - 1.0) * 100.0
+        if np.isfinite(signal_range_pct) and signal_range_pct > adr_pct * bt.avoid_chase_adr_multiple:
+            return EntryPlan(False, f"already moved {signal_range_pct:.1f}% on the signal day (anti-chase)")
+
+    trigger_price = None
+    limit_cap_price = None
+
+    if bt.entry_mode == "stop_buy":
+        # A resting order just beyond the signal day's extreme.
+        if side == "long":
+            trigger_price = signal_bar["high"] * (1 + bt.entry_buffer_pct / 100.0)
+        else:
+            trigger_price = signal_bar["low"] * (1 - bt.entry_buffer_pct / 100.0)
+        if not np.isfinite(trigger_price) or trigger_price <= 0:
+            return EntryPlan(False, "no valid trigger price")
+        if bt.max_gap_fill_pct > 0:
+            limit_cap_price = trigger_price * (1 + sign * bt.max_gap_fill_pct / 100.0)
+
+        if entry_bar is None:
+            # Planning ahead: assume a fill exactly at the trigger.
+            raw_entry_price = trigger_price
+        else:
+            triggered = (
+                entry_bar["high"] >= trigger_price if side == "long"
+                else entry_bar["low"] <= trigger_price
+            )
+            if not triggered:
+                return EntryPlan(False, "never traded through the trigger", trigger_price=trigger_price)
+            # A gap far past the trigger fills at a price the setup never
+            # justified. Note this can only fire when open is already beyond
+            # the trigger, so it can't conflict with the trigger test above.
+            if limit_cap_price is not None:
+                gapped_past = (
+                    entry_bar["open"] > limit_cap_price if side == "long"
+                    else entry_bar["open"] < limit_cap_price
+                )
+                if gapped_past:
+                    return EntryPlan(
+                        False, f"gapped past the trigger (opened {entry_bar['open']:.2f})",
+                        trigger_price=trigger_price, limit_cap_price=limit_cap_price,
+                    )
+            raw_entry_price = (
+                max(entry_bar["open"], trigger_price) if side == "long"
+                else min(entry_bar["open"], trigger_price)
+            )
+    else:
+        if entry_bar is None:
+            return EntryPlan(False, "no entry bar yet (next_open needs one)")
+        raw_entry_price = entry_bar["open"]
+
+    if not np.isfinite(raw_entry_price) or raw_entry_price <= 0:
+        return EntryPlan(False, "no valid entry price")
+    entry_price = raw_entry_price * (1 + bt.slippage_pct / 100.0 * sign)
+
+    adr_stop_distance = entry_price * (adr_pct / 100.0) * bt.stop_adr_multiple
+    if adr_stop_distance <= 0:
+        return EntryPlan(False, "ADR stop distance is zero")
+
+    if stop_mode == "low_of_signal_day":
+        if side == "long":
+            raw_stop_distance = entry_price - signal_bar["low"]
+        else:
+            raw_stop_distance = signal_bar["high"] - entry_price
+        if not np.isfinite(raw_stop_distance) or raw_stop_distance <= 0:
+            stop_distance = adr_stop_distance
+        elif raw_stop_distance > adr_stop_distance:
+            # The signal day's low is further than stop_adr_multiple ADRs from
+            # where we actually got filled. See stop_exceeds_adr_action's
+            # comment in settings.py -- this binds on most trades under
+            # stop_buy, which is why the choice is exposed at all.
+            if bt.stop_exceeds_adr_action == "skip":
+                return EntryPlan(
+                    False,
+                    f"stop would be {raw_stop_distance / adr_stop_distance:.1f}x the ADR cap",
+                    trigger_price=trigger_price, limit_cap_price=limit_cap_price, adr_pct=adr_pct,
+                )
+            stop_distance = adr_stop_distance
+        else:
+            stop_distance = raw_stop_distance
+    else:
+        stop_distance = adr_stop_distance
+
+    if stop_distance <= 0:
+        return EntryPlan(False, "stop distance is zero")
+
+    stop_price = entry_price - sign * stop_distance
+    target_price = entry_price + sign * bt.partial_profit_r_multiple * stop_distance
+    return EntryPlan(
+        True, None,
+        entry_price=entry_price, stop_price=stop_price, stop_distance=stop_distance,
+        target_price=target_price, trigger_price=trigger_price,
+        limit_cap_price=limit_cap_price, adr_pct=adr_pct,
+    )
+
+
 def run_backtest(
     bt: BacktestSettings,
     signals: dict,
@@ -168,14 +313,25 @@ def run_backtest(
 
     all_dates = sorted(set().union(*[set(df.index) for df in prepared.values()]))
 
+    # stop_buy models a premarket order placed for the session immediately
+    # after the signal, so the delay is structurally fixed at 1 bar: 0 would
+    # derive the trigger from the same bar it fills on (look-ahead), and >=2
+    # would arm a stale trigger from days earlier. Coerced rather than
+    # raised -- optimizer.py grid-loops over run_backtest with no exception
+    # handling, so a raise here would kill an entire parameter sweep.
+    effective_entry_delay = 1 if bt.entry_mode == "stop_buy" else bt.entry_delay_days
+
     # Precompute, for every symbol, the entry date for every signal (offset
-    # by entry_delay_days within that symbol's own trading calendar).
+    # by the effective delay within that symbol's own trading calendar).
+    # Under stop_buy this is the date the order is LIVE for, not a guaranteed
+    # fill -- whether it actually fills is decided per-bar below, since that
+    # needs the entry bar's high/open.
     entries_by_date = defaultdict(list)
     for symbol, df in prepared.items():
         idx = df.index
         match_locs = np.where(df["match"].fillna(False).values)[0]
         for loc in match_locs:
-            entry_loc = loc + bt.entry_delay_days
+            entry_loc = loc + effective_entry_delay
             if entry_loc < len(idx):
                 entries_by_date[idx[entry_loc]].append((symbol, idx[loc]))
 
@@ -269,45 +425,18 @@ def run_backtest(
             if date not in df.index or signal_date not in df.index:
                 continue
 
-            raw_entry_price = df.loc[date, "open"]
-            if not np.isfinite(raw_entry_price) or raw_entry_price <= 0:
-                continue
-            entry_price = raw_entry_price * (1 + bt.slippage_pct / 100.0 * sign)
-
             signal_bar = df.loc[signal_date]
-            adr_pct = signal_bar["adr_pct"]
-            if not np.isfinite(adr_pct) or adr_pct <= 0:
+            entry_bar = df.loc[date]
+
+            # Anti-chase, entry fill (incl. whether a stop-buy triggered at
+            # all) and stop placement all live in one shared helper so the
+            # Orders tab, stop_calculator and the chart overlay can't drift
+            # away from what the engine actually does.
+            plan = resolve_entry_and_stop(bt, side, signal_bar, entry_bar, effective_stop_mode)
+            if not plan.tradeable:
                 continue
-
-            # Anti-chase filter: skip if the signal day's own range already
-            # blew past a normal day for this stock -- "if price change on
-            # day is more than the ATR, skip it."
-            if bt.avoid_chase_adr_multiple > 0:
-                signal_range_pct = (signal_bar["high"] / signal_bar["low"] - 1.0) * 100.0
-                if np.isfinite(signal_range_pct) and signal_range_pct > adr_pct * bt.avoid_chase_adr_multiple:
-                    continue
-
-            adr_stop_distance = entry_price * (adr_pct / 100.0) * bt.stop_adr_multiple
-            if adr_stop_distance <= 0:
-                continue
-
-            if effective_stop_mode == "low_of_signal_day":
-                # Stop at the signal day's actual low (high for shorts),
-                # capped so it's never more than stop_adr_multiple ADRs away
-                # ("stop should be no more than the ATR").
-                if side == "long":
-                    raw_stop_distance = entry_price - signal_bar["low"]
-                else:
-                    raw_stop_distance = signal_bar["high"] - entry_price
-                if not np.isfinite(raw_stop_distance) or raw_stop_distance <= 0:
-                    stop_distance = adr_stop_distance
-                else:
-                    stop_distance = min(raw_stop_distance, adr_stop_distance)
-            else:
-                stop_distance = adr_stop_distance
-
-            if stop_distance <= 0:
-                continue
+            entry_price = plan.entry_price
+            stop_distance = plan.stop_distance
 
             risk_amount = equity * bt.risk_pct_per_trade / 100.0
             shares = risk_amount / stop_distance
@@ -329,13 +458,52 @@ def run_backtest(
             if shares <= 0:
                 continue
 
+            stop_price = plan.stop_price
+            target_price = plan.target_price
+
+            # The entry bar is never seen by the exits loop above (it runs
+            # before entries), so a fill that reverses through its own stop
+            # the same session would otherwise be carried to the next day for
+            # free. Under stop_buy the fill sits near the TOP of the bar's
+            # range, which makes that materially more likely -- see
+            # check_same_bar_stop in settings.py.
+            if bt.check_same_bar_stop:
+                stopped_same_bar = (
+                    entry_bar["low"] <= stop_price if side == "long"
+                    else entry_bar["high"] >= stop_price
+                )
+                if stopped_same_bar:
+                    # Same slippage/commission convention as the main exit
+                    # path below: slippage hits the cash proceeds, PnL is
+                    # measured on the raw prices, commission is charged once
+                    # on the full position.
+                    if side == "long":
+                        cash += shares * stop_price * (1 - bt.slippage_pct / 100.0) - shares * entry_price
+                        total_pnl = (stop_price - entry_price) * shares
+                    else:
+                        cash += shares * entry_price - shares * stop_price * (1 + bt.slippage_pct / 100.0)
+                        total_pnl = (entry_price - stop_price) * shares
+                    commission = bt.commission_per_share * shares
+                    total_pnl -= commission
+                    cash -= commission
+
+                    trade = Trade(
+                        symbol=symbol, side=side, signal_date=signal_date, entry_date=date,
+                        entry_price=entry_price, initial_shares=shares,
+                        stop_price=stop_price, target_price=target_price,
+                    )
+                    trade.exit_date = date
+                    trade.exit_price = stop_price
+                    trade.exit_reason = "stop_same_bar"
+                    trade.pnl = total_pnl
+                    trade.r_multiple = total_pnl / (stop_distance * shares) if stop_distance > 0 else 0.0
+                    trade.shares = 0.0
+                    closed_trades.append(trade)
+                    continue
+
             if side == "long":
-                stop_price = entry_price - stop_distance
-                target_price = entry_price + bt.partial_profit_r_multiple * stop_distance
                 cash -= shares * entry_price
             else:
-                stop_price = entry_price + stop_distance
-                target_price = entry_price - bt.partial_profit_r_multiple * stop_distance
                 cash += shares * entry_price
 
             open_positions[symbol] = Trade(

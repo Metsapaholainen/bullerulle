@@ -59,6 +59,73 @@ def add_consecutive_up_days(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_sma_slope(df: pd.DataFrame, period: int = 50, lookback: int = 20) -> pd.DataFrame:
+    """% change in the `period`-day SMA over the last `lookback` days.
+
+    "Above the 50-day" and "the 50-day is rising" are different claims: a
+    stock can sit above a rolling-over 50-day for weeks on the way down.
+    Qullamaggie's rule is to surf *rising* averages, so the quality score
+    wants the slope, not just the position."""
+    df = df.copy()
+    sma_col = f"sma_{period}"
+    if sma_col not in df.columns:
+        df[sma_col] = df["close"].rolling(period).mean()
+    prior = df[sma_col].shift(lookback)
+    df[f"sma_{period}_slope_pct"] = (df[sma_col] - prior) / prior * 100.0
+    return df
+
+
+def add_volume_dryup(df: pd.DataFrame, base_days: int, avg_period: int = 50) -> pd.DataFrame:
+    """Ratio of the base window's average volume to the longer-run average.
+
+    "Volume drying up into the pivot" is one of the few genuinely
+    predictive parts of a base -- sellers are exhausted, so it takes less
+    buying to move price. Below ~0.9 means the base is quieter than the
+    stock's own norm. The window excludes today (`.shift(1)`) so a breakout
+    day's own volume surge can't mask the dry-up that preceded it."""
+    df = df.copy()
+    avg_col = f"vol_avg_{avg_period}"
+    if avg_col not in df.columns:
+        df = add_volume_stats(df, avg_period=avg_period)
+    base_avg_vol = df["volume"].shift(1).rolling(base_days).mean()
+    df[f"vol_dryup_{base_days}"] = base_avg_vol / df[avg_col]
+    return df
+
+
+def add_efficiency_ratio(df: pd.DataFrame, window: int, col_name: str = None) -> pd.DataFrame:
+    """Kaufman efficiency ratio: |net change| / sum(|daily changes|) over
+    `window` days, in [0, 1].
+
+    This is the quantitative form of what Qullamaggie calls "linearity" and
+    what he says you can only "train your eye on" -- 1.0 is a perfectly
+    straight move, 0.1 is the same net distance travelled via chop. Two
+    bases with identical high-low ranges score very differently here, which
+    is exactly the distinction a range-based tightness filter can't make."""
+    df = df.copy()
+    net_change = (df["close"] - df["close"].shift(window)).abs()
+    path_length = df["close"].diff().abs().rolling(window).sum()
+    name = col_name or f"efficiency_ratio_{window}"
+    df[name] = (net_change / path_length).replace([float("inf"), float("-inf")], pd.NA)
+    return df
+
+
+def rs_line_at_high(close: pd.Series, benchmark_close: pd.Series, window: int = 63) -> pd.Series:
+    """Bool series: is the stock/benchmark ratio at a `window`-day high?
+
+    The RS *line* making a new high while price is still building a base is
+    the classic "leader" tell -- it means the stock outperformed even while
+    consolidating. Distinct from the RS *rating*, which is a cross-sectional
+    percentile at a point in time; this is a within-symbol time series.
+    Returns all-False when the benchmark isn't loaded rather than raising,
+    so callers don't need to special-case a missing SPY."""
+    if benchmark_close is None or benchmark_close.empty:
+        return pd.Series(False, index=close.index)
+    bench = benchmark_close.reindex(close.index).ffill(limit=5)
+    rs_line = close / bench
+    rolling_max = rs_line.rolling(window, min_periods=max(2, window // 4)).max()
+    return (rs_line >= rolling_max) & rs_line.notna()
+
+
 def add_core_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Convenience: everything the three setups need, computed once."""
     df = add_moving_averages(df, ema_periods=(10, 20), sma_periods=(50, 200))

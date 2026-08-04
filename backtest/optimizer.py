@@ -48,7 +48,11 @@ def run_grid_search(
             set_nested(settings, key, value)
 
         signals = scan_signals_over_history(settings, history, setup_name)
-        result = run_backtest(settings.backtest, signals, side=side)
+        # setup_name matters: it's what activates bt.ep_stop_mode_override for
+        # episodic_pivot. Omitting it here meant every grid search silently
+        # ignored that override while the single-run backtest honoured it,
+        # so the two disagreed on the same settings.
+        result = run_backtest(settings.backtest, signals, side=side, setup_name=setup_name)
         stats = compute_stats(result)
 
         row = dict(zip(keys, combo))

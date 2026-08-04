@@ -19,6 +19,7 @@ def compute_stats(result: BacktestResult) -> dict:
             "win_rate": np.nan,
             "avg_r": np.nan,
             "expectancy_r": np.nan,
+            "profit_factor": np.nan,
             "total_pnl": 0.0,
             "cagr": np.nan,
             "max_drawdown_pct": np.nan,
@@ -29,6 +30,15 @@ def compute_stats(result: BacktestResult) -> dict:
     wins = trades[trades["pnl"] > 0]
     losses = trades[trades["pnl"] <= 0]
     win_rate = len(wins) / len(trades) * 100.0
+    # Gross profit / gross loss. Worth having alongside expectancy_r because
+    # the two disagree in a specific, informative way: expectancy is measured
+    # in R (risk units), so a trade whose stop was capped tight scores a huge
+    # R on a modest dollar gain. Profit factor is measured in dollars, so a
+    # strategy that looks excellent on expectancy but mediocre here is
+    # winning mostly on trades it barely sized into.
+    gross_profit = wins["pnl"].sum() if not wins.empty else 0.0
+    gross_loss = abs(losses["pnl"].sum()) if not losses.empty else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (np.inf if gross_profit > 0 else np.nan)
     avg_r = trades["r_multiple"].mean()
     avg_win_r = wins["r_multiple"].mean() if not wins.empty else 0.0
     avg_loss_r = losses["r_multiple"].mean() if not losses.empty else 0.0
@@ -55,6 +65,7 @@ def compute_stats(result: BacktestResult) -> dict:
         "win_rate": win_rate,
         "avg_r": avg_r,
         "expectancy_r": expectancy_r,
+        "profit_factor": profit_factor,
         "total_pnl": trades["pnl"].sum(),
         "cagr": cagr * 100.0 if pd.notna(cagr) else np.nan,
         "max_drawdown_pct": max_drawdown_pct,

@@ -43,22 +43,30 @@ class RSRatingSettings:
 
 @dataclass
 class BreakoutSettings:
+    # NOTE on the loosened defaults below (min_adr_pct, prior_move_min_pct,
+    # max_consolidation_range_pct, min_rs_rating): these were each tightened
+    # to Qullamaggie's own stated numbers, which is correct in isolation but
+    # wrong as an AND-chain -- stacked, they cut real scans to ~5 matches per
+    # 400 symbols. Each of those criteria is now *scored* in setup_quality.py
+    # (0-6.5 -> 1-6 stars) instead of being a cliff, so a stock with RS 84
+    # still surfaces and simply ranks below one with RS 98. Filter wide, rank
+    # hard: use the Scanner's "minimum stars" control to tighten, not these.
     enabled: bool = True
-    min_adr_pct: float = 4.0
+    min_adr_pct: float = 3.5
     adr_lookback_days: int = 20
     prior_move_lookback_days: int = 63
-    prior_move_min_pct: float = 30.0
+    prior_move_min_pct: float = 20.0
     prior_move_max_pct: float = 100.0
     min_consolidation_days: int = 10
     max_consolidation_days: int = 40
-    max_consolidation_range_pct: float = 25.0
+    max_consolidation_range_pct: float = 32.0
     require_above_ema10: bool = True
     require_above_ema20: bool = True
     ema_fast_period: int = 10
     ema_slow_period: int = 20
     breakout_volume_ratio_min: float = 1.5
     volume_avg_period: int = 50
-    min_rs_rating: float = 90.0
+    min_rs_rating: float = 80.0
     # "Surf the rising 10- and 20-day moving averages" -- being *above* the
     # EMA (require_above_ema10/20 above) isn't the same as the EMA itself
     # actually sloping upward. These check the EMA's own trend. Opt-in
@@ -190,6 +198,56 @@ class HighTightFlagSettings:
 
 
 @dataclass
+class MomentumBurstSettings:
+    """Stockbee (Pradeep Bonde) "Momentum Burst" -- a 3-5 day swing off a
+    range-expansion day out of a quiet base.
+
+    Bonde's published scan has been unchanged for 14+ years and is only three
+    conditions: `c/c1 >= 1.04 and v > v1 and v > 100000`. Everything else
+    below is his separately-published 8-point quality checklist made
+    quantitative. Included here because it is the closest published system to
+    "hold 3-5 days, sell half, trail the rest" with an EOD scan and a
+    stop-buy entry -- and because Qullamaggie credits Bonde as a source.
+
+    His words on the hold: "3 to 5 days moves of 8% to 40%." On entry timing:
+    take day 1 of the burst, not day 2 or 3 (that's max_consecutive_up_days)."""
+    enabled: bool = True
+    # --- Bonde's core scan, verbatim ---
+    min_gain_pct: float = 4.0             # c/c1 >= 1.04
+    require_volume_above_prior: bool = True   # v > v1
+    min_volume: float = 100_000           # v > 100000
+    # --- liquidity, ours: the Qullamaggie community's usual $3M/day floor ---
+    min_dollar_volume: float = 3_000_000
+    # --- the 8-point quality checklist ---
+    # 1. "stock should have range expansion on breakout day"
+    min_range_expansion_ratio: float = 1.3
+    range_expansion_lookback: int = 5
+    # 3. "day before breakout should be narrow range day or negative day"
+    require_quiet_prior_day: bool = True
+    # 4. "pre breakout there should not be many big range moves or breakdowns"
+    max_base_daily_move_pct: float = 8.0
+    # 5. "stock should have linearity in prior uptrend before the consolidation"
+    min_efficiency_ratio: float = 0.25
+    prior_uptrend_lookback_days: int = 40
+    # 6. "correction or consolidation should be orderly during the entire move"
+    consolidation_days: int = 10          # "5 to 10 days of orderly consolidation"
+    max_consolidation_range_pct: float = 20.0
+    # 7. "volume during consolidation should be preferably orderly and lower"
+    require_volume_dryup: bool = True
+    volume_dryup_ratio_max: float = 1.0
+    # 8. "stock should close near high on breakout day"
+    min_close_position_pct: float = 60.0  # close in the top 40% of the day's range
+    # "avoid day 2/3 entries" -- the burst is already underway by then and the
+    # stop is too far from the entry to be worth taking.
+    max_consecutive_up_days: int = 3
+    # --- shared plumbing ---
+    volume_avg_period: int = 50
+    min_adr_pct: float = 3.0
+    min_rs_rating: float = 70.0
+    adr_lookback_days: int = 20
+
+
+@dataclass
 class BacktestSettings:
     initial_capital: float = 100_000
     risk_pct_per_trade: float = 1.0
@@ -202,6 +260,54 @@ class BacktestSettings:
     # day... stop should be no more than the ATR").
     stop_mode: str = "low_of_signal_day"
     stop_adr_multiple: float = 1.0
+    # What to do when the signal day's low sits FURTHER than stop_adr_multiple
+    # ADRs from where we actually got filled.
+    #   "cap":  silently tighten the stop to the ADR distance. Original
+    #           behaviour -- but the stop then no longer sits under the
+    #           signal-day low, so an ordinary pullback into the base takes
+    #           you out of a trade that was still working.
+    #   "skip": don't take the trade. This is the actual rule ("the stop
+    #           should be no more than the ATR") -- if it would be wider,
+    #           the setup isn't takeable at acceptable risk.
+    # Matters much more under entry_mode="stop_buy", where the higher fill
+    # makes the cap bind on nearly every trade, silently degenerating
+    # stop_mode="low_of_signal_day" into "adr_multiple".
+    stop_exceeds_adr_action: str = "cap"
+    # How the entry actually gets filled.
+    #   "next_open": fill unconditionally at the next bar's open. What every
+    #                result recorded before this flag existed was measured
+    #                with -- keep it to reproduce those numbers.
+    #   "stop_buy":  a resting premarket buy-stop entry_buffer_pct above the
+    #                signal day's high (mirror: a sell-stop below the low for
+    #                shorts). If price never trades through the trigger there
+    #                is no trade -- which is the whole point. "next_open"
+    #                fills every signal including the ones that opened and
+    #                immediately rolled over, and those are exactly the
+    #                failed breakouts a real stop order never buys.
+    # Default is "stop_buy" because it is how this app's user actually
+    # trades; it also lowers trade counts substantially, which is expected.
+    entry_mode: str = "stop_buy"
+    # How far beyond the signal-day extreme the resting order sits. A few
+    # basis points, enough that a single tick touching the exact high doesn't
+    # fill you on a level that was never really taken out.
+    entry_buffer_pct: float = 0.05
+    # Stand aside when the bar opens more than this % past the trigger. A gap
+    # that far through the order fills you at a price the setup never
+    # justified, and leaves the stop an unacceptable distance away. This is
+    # the closest daily-bar substitute for the opening-range-high filter
+    # (skipping a stock that gaps up then fails) -- it is not equivalent.
+    # 0 disables: you take the gapped fill.
+    max_gap_fill_pct: float = 0.0
+    # Check whether the ENTRY bar itself traded back through the stop.
+    # Off by default, and worth understanding before turning on: the exits
+    # loop runs before the entries loop, so a position opened on bar D isn't
+    # exit-checked until D+1. Under stop_buy you enter near the TOP of the
+    # entry bar's range, so a bar that pokes the trigger and then closes at
+    # its low blows through the stop with zero modelling. Leaving this off
+    # inflates the win rate; turning it on is more honest but strictly
+    # pessimistic (it assumes the low came after the fill, which isn't
+    # knowable from a daily bar).
+    check_same_bar_stop: bool = False
     partial_profit_r_multiple: float = 1.0
     partial_profit_fraction: float = 0.5
     # Fallback partial-profit trigger by time elapsed, independent of whether
@@ -251,6 +357,7 @@ class Settings:
     flat_base: FlatBaseSettings = field(default_factory=FlatBaseSettings)
     ascending_base: AscendingBaseSettings = field(default_factory=AscendingBaseSettings)
     high_tight_flag: HighTightFlagSettings = field(default_factory=HighTightFlagSettings)
+    momentum_burst: MomentumBurstSettings = field(default_factory=MomentumBurstSettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
 
     def to_dict(self) -> dict:
@@ -272,6 +379,7 @@ class Settings:
             flat_base=FlatBaseSettings(**d.get("flat_base", {})),
             ascending_base=AscendingBaseSettings(**d.get("ascending_base", {})),
             high_tight_flag=HighTightFlagSettings(**d.get("high_tight_flag", {})),
+            momentum_burst=MomentumBurstSettings(**d.get("momentum_burst", {})),
             backtest=BacktestSettings(**d.get("backtest", {})),
         )
 
