@@ -14,7 +14,7 @@ universe:
   exchanges: ["NASDAQ", "NYSE", "AMEX"]
   exclude_etf: true
   exclude_funds: true
-  max_symbols: 1500
+  max_symbols: 6000
   momentum_timeframes_days: [21, 63, 126, 252, 378]
   momentum_top_pct: 6.0             # wider pre-filter funnel, up from 2.0
 

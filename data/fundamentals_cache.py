@@ -57,40 +57,51 @@ def _fetch_fundamentals(client: FMPClient, symbol: str) -> dict:
         "earnings_decelerating": False, "earnings_deceleration_reason": None,
     }
 
-    quarterly_growth = None
     try:
-        quarterly_growth = client.income_statement_growth(symbol, period="quarter", limit=8)
-        if quarterly_growth:
-            row = quarterly_growth[0]
-            rev_g = row.get("growthRevenue")
-            eps_g = row.get("growthEPS")
-            out["revenue_growth_pct"] = round(rev_g * 100.0, 2) if rev_g is not None else None
-            out["eps_growth_pct"] = round(eps_g * 100.0, 2) if eps_g is not None else None
-            # Kept as raw decimal fractions (not *100) -- detect_earnings_deceleration
-            # and the log-scale chart both want the same units FMP returns.
-            out["eps_growth_history"] = [
-                {"date": r.get("date"), "growthEPS": r.get("growthEPS"), "growthRevenue": r.get("growthRevenue")}
-                for r in quarterly_growth
-            ]
-    except FMPError:
-        pass
-
-    if quarterly_growth:
-        # "Two consecutive quarters of major earnings deceleration" (O'Neil) --
-        # informational only, never blocks a scan match; see PATTERN_EXPLANATIONS
-        # / the Fundamentals panel for how this is surfaced.
-        decel = detect_earnings_deceleration(quarterly_growth)
-        out["earnings_decelerating"] = decel["decelerating"]
-        out["earnings_deceleration_reason"] = decel["reason"]
-
-    try:
+        # Raw quarterly EPS/revenue -- also the basis for growth below.
+        #
+        # Growth here is computed as quarter-vs-same-quarter-one-year-ago
+        # (YoY), the standard CANSLIM/Qullamaggie convention ("compared to
+        # the same quarter last year") that the rest of this app assumes.
+        # FMP's own /income-statement-growth endpoint was used here
+        # previously and looked plausible, but is actually QoQ (this
+        # quarter vs the immediately prior quarter) -- verified live
+        # against NVDA: it reported 19.8% "growth" for a quarter whose
+        # revenue was actually +85% vs the same quarter a year earlier, and
+        # matched the QoQ figure exactly. Computing directly from quarter
+        # vs quarter-4-back avoids that mismatch entirely.
         income = client.income_statement(symbol, period="quarter", limit=8)
         if income:
             out["eps_history"] = [
                 {"date": r.get("date"), "eps": r.get("eps"), "revenue": r.get("revenue")} for r in income
             ]
+            yoy_growth = []
+            for i in range(len(income) - 4):
+                cur, prior = income[i], income[i + 4]
+                cur_rev, prior_rev = cur.get("revenue"), prior.get("revenue")
+                cur_eps, prior_eps = cur.get("eps"), prior.get("eps")
+                rev_g = (cur_rev - prior_rev) / abs(prior_rev) if cur_rev is not None and prior_rev else None
+                eps_g = (cur_eps - prior_eps) / abs(prior_eps) if cur_eps is not None and prior_eps else None
+                yoy_growth.append({"date": cur.get("date"), "growthEPS": eps_g, "growthRevenue": rev_g})
+            if yoy_growth:
+                out["eps_growth_history"] = yoy_growth
+                latest = yoy_growth[0]
+                out["revenue_growth_pct"] = (
+                    round(latest["growthRevenue"] * 100.0, 2) if latest["growthRevenue"] is not None else None
+                )
+                out["eps_growth_pct"] = (
+                    round(latest["growthEPS"] * 100.0, 2) if latest["growthEPS"] is not None else None
+                )
     except FMPError:
         pass
+
+    if out["eps_growth_history"]:
+        # "Two consecutive quarters of major earnings deceleration" (O'Neil) --
+        # informational only, never blocks a scan match; see PATTERN_EXPLANATIONS
+        # / the Fundamentals panel for how this is surfaced.
+        decel = detect_earnings_deceleration(out["eps_growth_history"])
+        out["earnings_decelerating"] = decel["decelerating"]
+        out["earnings_deceleration_reason"] = decel["reason"]
 
     try:
         # /profile carries market cap, full company name, and sector in one

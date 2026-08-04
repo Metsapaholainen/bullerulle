@@ -22,7 +22,6 @@ ENDPOINTS = {
     "historical_price_eod_full": "/historical-price-eod/full",
     "quote": "/quote",
     "profile": "/profile",
-    "income_statement_growth": "/income-statement-growth",
     "income_statement": "/income-statement",
     "shares_float": "/shares-float",
     "earnings_calendar": "/earnings-calendar",
@@ -153,19 +152,14 @@ class FMPClient:
             return data[0]
         return data if isinstance(data, dict) else {}
 
-    def income_statement_growth(self, symbol: str, period: str = "quarter", limit: int = 1) -> list:
-        """Wraps /income-statement-growth -- fields of interest are
-        `growthRevenue`/`growthEPS` (decimal fractions, e.g. 0.11 = 11%)."""
-        data = self._get(
-            ENDPOINTS["income_statement_growth"], params={"symbol": symbol, "period": period, "limit": limit}
-        )
-        return data if isinstance(data, list) else []
-
     def income_statement(self, symbol: str, period: str = "quarter", limit: int = 8) -> list:
-        """Wraps /income-statement -- raw (not growth-rate) `eps`/`revenue`
-        per period, most-recent-first. Used for the log-scale earnings trend
-        chart, where income_statement_growth's decimal growth rates aren't
-        enough (need the actual EPS level to plot)."""
+        """Wraps /income-statement -- raw `eps`/`revenue` per period, most-
+        recent-first. This is the only earnings-growth data source used by
+        this app: /income-statement-growth (FMP's own growth-rate endpoint)
+        computes quarter-over-quarter, not the year-over-year figure
+        Qullamaggie/CANSLIM-style screening actually wants, so callers
+        derive growth themselves from these raw values instead (see
+        data/fundamentals_cache.py)."""
         data = self._get(
             ENDPOINTS["income_statement"], params={"symbol": symbol, "period": period, "limit": limit}
         )

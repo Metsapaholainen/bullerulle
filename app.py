@@ -38,7 +38,7 @@ from scanner import (
 )
 from data.fundamentals_cache import get_earnings_dates, get_fundamentals, get_fundamentals_bulk
 from fundamentals_classifier import classify_lynch, days_to_earnings, filter_earnings_avoidance, LYNCH_CATEGORIES
-from indicators import add_adr_pct, add_volume_stats
+from indicators import add_adr_pct, add_volume_stats, build_close_panel, compute_rs_rating_panel
 from stop_calculator import compute_stop_and_size
 from legout_scans import LEGOUT_SCANS, SKIPPED_SCANS, run_legout_scans, scan_legout_signals_over_history
 from notifications import send_ntfy_alert, send_sell_alerts
@@ -302,22 +302,72 @@ def render_add_to_sell_alerts_button(symbol: str, key_suffix: str, ma_period: in
             st.success(f"Added {symbol} to Sell Alerts ({ma_period}-day MA).")
 
 
+def _history_fingerprint(history: dict) -> tuple:
+    return tuple(sorted((sym, str(df.index[-1]), len(df)) for sym, df in history.items() if not df.empty))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_rs_rating_panel(_history: dict, history_fp: tuple, lookback_periods: tuple, period_weights: tuple) -> pd.DataFrame:
+    """Cross-sectional RS rating (1-99 percentile rank of weighted multi-
+    period return) computed across whatever's currently loaded -- the same
+    build_close_panel/compute_rs_rating_panel machinery run_scan() already
+    uses internally, exposed here so any chart (not just a scan-matched
+    row) can show a symbol's RS rating. `_history` (leading underscore) is
+    excluded from the cache key since a dict of DataFrames isn't hashable;
+    `history_fp` is a plain hashable summary standing in for it, so the
+    cache still correctly invalidates when the loaded data changes.
+
+    NOTE: this is relative to whatever's currently loaded, not literally
+    "the whole market" -- with only a handful of symbols loaded, the rank
+    is a coarse approximation, not a true IBD-style rating."""
+    close_panel = build_close_panel(_history)
+    return compute_rs_rating_panel(close_panel, list(lookback_periods), list(period_weights))
+
+
+def get_symbol_rs_rating(symbol: str, history: dict, at_date=None) -> Optional[float]:
+    """RS rating for `symbol` as of `at_date` (or the most recent available
+    date if omitted/not found in the index), or None if the symbol isn't
+    loaded. Cheap on top of the cached panel above -- just a column lookup."""
+    if symbol not in history or history[symbol].empty:
+        return None
+    rs = st.session_state.settings.rs_rating
+    panel = _cached_rs_rating_panel(
+        history, _history_fingerprint(history), tuple(rs.lookback_periods), tuple(rs.period_weights)
+    )
+    if symbol not in panel.columns:
+        return None
+    col = panel[symbol].dropna()
+    if col.empty:
+        return None
+    if at_date is not None:
+        col = col[col.index <= pd.Timestamp(at_date)]
+        if col.empty:
+            return None
+    return float(col.iloc[-1])
+
+
 def _lightweight_fundamentals(symbol: str) -> dict:
-    """Cached market_cap/company_name/sector/revenue_growth_pct/eps_growth_pct
-    lookup for chart call sites with no scan-result row already carrying
-    these fields (Browse all charts' no-match branch, Paper Trading). A
-    network hiccup here should never block the chart itself from
-    rendering, so any failure just yields an empty dict (plot_symbol
+    """Cached market_cap/company_name/sector/revenue_growth_pct/eps_growth_pct/
+    rs_rating lookup for chart call sites with no scan-result row already
+    carrying these fields (Browse all charts' no-match branch, Paper
+    Trading). A network hiccup here should never block the chart itself
+    from rendering, so any failure just yields an empty dict (plot_symbol
     treats every one of these kwargs as optional)."""
+    out = {}
     try:
         fd = get_fundamentals(FMPClient(), symbol)
+        out = {
+            "market_cap": fd.get("market_cap"), "company_name": fd.get("company_name"),
+            "sector": fd.get("sector"),
+            "revenue_growth_pct": fd.get("revenue_growth_pct"), "eps_growth_pct": fd.get("eps_growth_pct"),
+        }
     except Exception:
-        return {}
-    return {
-        "market_cap": fd.get("market_cap"), "company_name": fd.get("company_name"),
-        "sector": fd.get("sector"),
-        "revenue_growth_pct": fd.get("revenue_growth_pct"), "eps_growth_pct": fd.get("eps_growth_pct"),
-    }
+        pass
+    try:
+        out["rs_rating"] = get_symbol_rs_rating(symbol, history)
+    except Exception:
+        pass
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -619,6 +669,7 @@ def plot_symbol(
     partial_date=None, partial_price=None,
     exit_date=None, exit_price=None, exit_reason=None, r_multiple=None,
     market_cap=None, company_name=None, revenue_growth_pct=None, eps_growth_pct=None, sector=None,
+    rs_rating=None,
 ):
     # Cached: this is a pure function of its arguments (no st.* calls, no
     # hidden global state besides static module-level constants), and it's
@@ -653,9 +704,12 @@ def plot_symbol(
         if market_cap:
             detail_parts.append(f"Mkt Cap: {_format_market_cap(market_cap)}")
         if revenue_growth_pct is not None and pd.notna(revenue_growth_pct):
-            detail_parts.append(f"Rev Growth: {revenue_growth_pct:+.1f}%")
+            detail_parts.append(f"Rev Growth (YoY): {revenue_growth_pct:+.1f}%")
         if eps_growth_pct is not None and pd.notna(eps_growth_pct):
-            detail_parts.append(f"EPS Growth: {eps_growth_pct:+.1f}%")
+            detail_parts.append(f"EPS Growth (YoY): {eps_growth_pct:+.1f}%")
+        if rs_rating is not None and pd.notna(rs_rating):
+            rs_color = "#2ecc71" if rs_rating >= 90 else "#cccccc"
+            detail_parts.append(f'<span style="color:{rs_color}">RS Rating: {rs_rating:.0f}</span>')
         if detail_parts:
             chart_title += "<br>" + "  |  ".join(detail_parts)
     for period, color in ((10, "orange"), (20, "blue")):
@@ -1280,6 +1334,7 @@ with tab_scanner:
                             market_cap=wrow.get("market_cap"), company_name=wrow.get("company_name"),
                             sector=wrow.get("sector"),
                             revenue_growth_pct=wrow.get("revenue_growth_pct"), eps_growth_pct=wrow.get("eps_growth_pct"),
+                            rs_rating=wrow.get("rs_rating"),
                         )
                     except Exception:
                         pass
@@ -1356,6 +1411,7 @@ with tab_scanner:
                         market_cap=row.get("market_cap"), company_name=row.get("company_name"),
                         sector=row.get("sector"),
                         revenue_growth_pct=row.get("revenue_growth_pct"), eps_growth_pct=row.get("eps_growth_pct"),
+                        rs_rating=row.get("rs_rating"),
                     ),
                     use_container_width=True,
                     key="scanner_match_chart",
@@ -1448,6 +1504,7 @@ with tab_scanner:
                         market_cap=browse_match.get("market_cap"), company_name=browse_match.get("company_name"),
                         sector=browse_match.get("sector"),
                         revenue_growth_pct=browse_match.get("revenue_growth_pct"), eps_growth_pct=browse_match.get("eps_growth_pct"),
+                        rs_rating=browse_match.get("rs_rating"),
                     ),
                     use_container_width=True,
                     key="browse_chart",
@@ -1752,6 +1809,7 @@ with tab_scanner:
                             market_cap=fund_row.get("market_cap"), company_name=fund_row.get("company_name"),
                             sector=fund_row.get("sector"),
                             revenue_growth_pct=fund_row.get("revenue_growth_pct"), eps_growth_pct=fund_row.get("eps_growth_pct"),
+                            rs_rating=get_symbol_rs_rating(fund_pick, history),
                         ),
                         use_container_width=True, key="fund_chart",
                     )
@@ -1775,8 +1833,10 @@ with tab_scanner:
 
             with st.expander("What do these columns mean?"):
                 st.markdown(
-                    "- **revenue_growth_pct / eps_growth_pct**: latest quarter's YoY growth. Qullamaggie's own "
-                    "bar for an Episodic Pivot: \"triple digit is ideal, mid/high double digits works really well too.\"\n"
+                    "- **revenue_growth_pct / eps_growth_pct**: latest quarter vs. the same quarter one year ago "
+                    "(YoY) -- computed directly from raw quarterly figures, not FMP's own growth-rate endpoint "
+                    "(which is quarter-over-quarter, not YoY). Qullamaggie's own bar for an Episodic Pivot: "
+                    "\"triple digit is ideal, mid/high double digits works really well too.\"\n"
                     "- **float_shares / free_float_pct**: shares actually available to trade -- a smaller float "
                     "moves faster on the same dollar volume.\n"
                     "- **insider_acq_disp_ratio**: last quarter's insider shares acquired ÷ disposed -- above 1 "
@@ -2006,11 +2066,17 @@ with tab_finder:
             st.json({k: (str(v) if isinstance(v, pd.Timestamp) else v) for k, v in observed.items()})
 
             marker_date = observed.get("date_used")
+            pf_rs_rating = None
+            if rs_series is not None and marker_date is not None:
+                rs_asof = rs_series[rs_series.index <= pd.Timestamp(marker_date)]
+                if not rs_asof.empty:
+                    pf_rs_rating = rs_asof.iloc[-1]
             st.plotly_chart(
                 plot_symbol(
                     history[pf_symbol], pf_symbol, marker_date=marker_date,
                     setup_key=pf_setup, settings=settings, row=observed,
                     side=SETUP_REGISTRY[pf_setup]["side"],
+                    rs_rating=pf_rs_rating,
                 ),
                 use_container_width=True,
                 key="param_finder_chart",
@@ -2729,6 +2795,7 @@ with tab_watchlist:
                     market_cap=watchlist_match.get("market_cap"), company_name=watchlist_match.get("company_name"),
                     sector=watchlist_match.get("sector"),
                     revenue_growth_pct=watchlist_match.get("revenue_growth_pct"), eps_growth_pct=watchlist_match.get("eps_growth_pct"),
+                    rs_rating=watchlist_match.get("rs_rating"),
                 ),
                 use_container_width=True,
                 key="watchlist_chart",
