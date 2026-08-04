@@ -3,3 +3,15 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+[runner]
+# Streamlit's default (true) starts the replacement script run on a new
+# thread BEFORE the interrupted one has finished dying, so the two overlap.
+# This app mutates shared state in place -- st.session_state.history.update()
+# in the sidebar, and apply_live_quotes() writing directly into the stored
+# DataFrames -- which is exactly the race Streamlit's own docs warn about for
+# this setting. Turning it off keeps cancel/rerun on a single thread with no
+# behavioural downside here: every long-running section (data load, chart
+# warm-up, backtest, optimizer grid) ticks a progress bar, so they all still
+# yield often enough to stay interruptible.
+fastReruns = false

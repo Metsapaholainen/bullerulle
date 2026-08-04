@@ -13,9 +13,10 @@ from dataclasses import asdict
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 import presets
-from backtest.engine import run_backtest
+from backtest.engine import resolve_entry_and_stop, run_backtest
 from backtest.optimizer import run_grid_search, set_nested
 from backtest.stats import compute_stats, stats_summary_text
 from backtest.target_fit import find_parameters_for_target
@@ -416,13 +417,38 @@ with st.sidebar:
 
     force_fresh_load = st.checkbox(
         "Force fresh reload (ignore cache)", value=False, key="force_fresh_load",
-        help="Loading is cached for this running app session -- reloading the exact same symbols/settings/date "
-        "(e.g. after a browser refresh) normally returns instantly instead of re-fetching everything. Check this "
-        "when you know the data's actually stale (new trading day, changed universe filters that should widen "
-        "the symbol list, etc.) to force a genuine re-fetch.",
+        help="Clears this app session's in-memory memo of the load, so the exact same "
+        "symbols/settings/date get re-processed instead of returning instantly. Note it does NOT re-download "
+        "price bars that are already in the local parquet cache and still cover the requested range -- those "
+        "always come from disk. That's deliberate (it's what makes a cancelled load resume quickly), but it "
+        "means this won't pull down a fresh copy of data you already have.",
     )
-    if st.button("Load / Refresh Data", type="primary"):
+
+    load_col, cancel_col = st.columns([3, 1])
+    with load_col:
+        do_load = st.button("Load / Refresh Data", type="primary", key="btn_load_data")
+    with cancel_col:
+        # Rendered unconditionally and BEFORE the blocking load below, so it
+        # exists in the DOM for the whole time the load runs. Clicking it
+        # sends a rerun request; Streamlit interrupts the in-flight script at
+        # its next progress-bar update (every element call checks for pending
+        # execution-control requests). The exception it raises derives from
+        # BaseException, so neither the `except Exception` here nor the
+        # per-symbol one in data/cache.py swallows it, and @st.cache_data
+        # only writes its entry on a clean return -- so a cancelled load
+        # leaves no partial cache entry and no held lock.
+        cancel_load = st.button(
+            "Cancel", key="btn_cancel_load",
+            help="Abandon a load that's in progress. Everything already fetched stays in the local "
+            "cache on disk, so starting again picks up from where it stopped.",
+        )
+
+    if cancel_load:
+        st.session_state["load_cancelled"] = True
+
+    if do_load and not cancel_load:
         symbols = [s.strip().upper() for s in custom_symbols.split(",") if s.strip()] or None
+        st.session_state.pop("load_cancelled", None)
         try:
             if force_fresh_load:
                 _cached_load_universe.clear()
@@ -445,6 +471,13 @@ with st.sidebar:
         except Exception as exc:
             st.error(f"Data load failed: {exc}")
             st.code(traceback.format_exc())
+
+    if st.session_state.pop("load_cancelled", False):
+        st.warning(
+            "Load cancelled. Nothing already in memory was touched, and every symbol fetched before you "
+            "cancelled is saved to the local cache -- click Load / Refresh Data again and it'll skip "
+            "straight past those and resume."
+        )
 
     st.caption(f"{len(st.session_state.history)} symbols currently cached in memory.")
 
@@ -513,8 +546,12 @@ if md or md_secondary:
 elif history:
     st.caption("Market direction unavailable -- reload data from the sidebar to fetch the SPY/QQQ benchmarks.")
 
-tab_scanner, tab_designer, tab_backtest, tab_finder, tab_live, tab_sell, tab_paper, tab_watchlist, tab_stopcalc, tab_settings = st.tabs(
-    ["Scanner", "Designer", "Backtest & Optimizer", "Parameter Finder", "Live Mode", "Sell Alerts", "Paper Trading", "Watchlist", "Stop Calculator", "Settings"]
+(
+    tab_scanner, tab_orders, tab_designer, tab_backtest, tab_finder, tab_live,
+    tab_sell, tab_paper, tab_watchlist, tab_stopcalc, tab_settings,
+) = st.tabs(
+    ["Scanner", "📋 Tomorrow's Orders", "Designer", "Backtest & Optimizer", "Parameter Finder",
+     "Live Mode", "Sell Alerts", "Paper Trading", "Watchlist", "Stop Calculator", "Settings"]
 )
 
 
@@ -579,10 +616,28 @@ def recommended_period_days(row, setup_key: str, settings: Settings) -> int:
     return max(int(window_days * 1.6), 60)
 
 
+VOLUME_MA_PERIOD = 20
+
+
+def _with_volume_ma(full_df: pd.DataFrame) -> pd.DataFrame:
+    """Attach the volume EMA BEFORE the frame gets sliced to a chart period.
+
+    Computing it inside plot_symbol would run it over the visible window
+    only, so the first 20 bars of a 3-month chart would show a ramping
+    average that isn't the stock's real 20-day norm -- and the whole point
+    of the line is to judge whether today's volume is unusual."""
+    if "volume" not in full_df.columns:
+        return full_df
+    out = full_df.copy()
+    out["vol_ema"] = out["volume"].ewm(span=VOLUME_MA_PERIOD, adjust=False).mean()
+    return out
+
+
 def resolve_chart_df(full_df: pd.DataFrame, period_label: str, row=None, setup_key: str = None, settings: Settings = None) -> pd.DataFrame:
     """Shared by every 'Chart period' picker: resolves the Auto option
     against a specific match's row/setup, otherwise defers to the fixed
     CHART_PERIODS buckets."""
+    full_df = _with_volume_ma(full_df)
     if period_label == AUTO_CHART_PERIOD:
         days = recommended_period_days(row, setup_key, settings)
         return full_df.tail(days) if days and len(full_df) > days else full_df
@@ -607,6 +662,7 @@ PATTERN_WINDOW_FIELDS = {
         ("run_up_lookback_days", "Run-up", "rgba(255,0,0,0.08)"),
         ("flag_lookback_days", "Flag", "rgba(255,165,0,0.30)"),
     ],
+    "momentum_burst": [("consolidation_days", "Quiet base", "rgba(100,149,237,0.18)")],
 }
 # Whichever of these diagnostic columns is present holds the pattern's key
 # breakout/resistance level, drawn as a horizontal reference line.
@@ -678,12 +734,49 @@ def plot_symbol(
     # the app, since Streamlit reruns the whole script every time. Caching
     # means switching a chart period/symbol elsewhere doesn't pay the cost
     # of rebuilding every *other* unrelated chart on the page.
-    fig = go.Figure()
+    # Two panes: price on row 1, volume on row 2. Every add_trace/add_hline/
+    # add_hrect/add_vrect below MUST pass row=1, col=1 -- on a subplots figure
+    # plotly defaults those to ALL subplots, which would draw the stop/target
+    # price lines across the volume pane (pinned to its bottom edge, since
+    # volumes are in the millions) and duplicate every annotation.
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, row_heights=[0.78, 0.22], vertical_spacing=0.03,
+    )
     fig.add_trace(
         go.Candlestick(
             x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name=symbol
-        )
+        ),
+        row=1, col=1,
     )
+
+    if "volume" in df.columns and df["volume"].notna().any():
+        # Bars tinted by the candle's own direction, so an up-day volume
+        # spike (accumulation) reads differently from a down-day spike
+        # (distribution) without needing a separate indicator.
+        vol_colors = [
+            "rgba(38,166,154,0.55)" if c >= o else "rgba(239,83,80,0.55)"
+            for c, o in zip(df["close"], df["open"])
+        ]
+        fig.add_trace(
+            go.Bar(
+                x=df.index, y=df["volume"], marker_color=vol_colors, name="Volume",
+                showlegend=False, hovertemplate="%{y:,.0f}<extra></extra>",
+            ),
+            row=2, col=1,
+        )
+        # Volume EMA20 -- precomputed on the FULL frame in _with_volume_ma()
+        # so it isn't biased by the visible window. Falls back to computing
+        # it here for the few call sites that pass a raw slice.
+        vol_ma = df["vol_ema"] if "vol_ema" in df.columns else df["volume"].ewm(
+            span=VOLUME_MA_PERIOD, adjust=False
+        ).mean()
+        fig.add_trace(
+            go.Scatter(
+                x=df.index, y=vol_ma, line=dict(width=1.4, color="#f0b90b"),
+                name=f"Vol EMA{VOLUME_MA_PERIOD}", showlegend=False, hoverinfo="skip",
+            ),
+            row=2, col=1,
+        )
 
     # ADR% (average daily range, the same trailing-20-day formula used to
     # size stops elsewhere in this app) plus company name/market cap/growth
@@ -714,7 +807,7 @@ def plot_symbol(
             chart_title += "<br>" + "  |  ".join(detail_parts)
     for period, color in ((10, "orange"), (20, "blue")):
         ema = df["close"].ewm(span=period, adjust=False).mean()
-        fig.add_trace(go.Scatter(x=df.index, y=ema, line=dict(width=1, color=color), name=f"EMA{period}"))
+        fig.add_trace(go.Scatter(x=df.index, y=ema, line=dict(width=1, color=color), name=f"EMA{period}"), row=1, col=1)
 
     # Simple (not exponential) moving averages -- a separate toggleable layer
     # on top of the EMA10/EMA20 pair above. Dashed + a distinct palette so
@@ -724,11 +817,17 @@ def plot_symbol(
     for period, color in ((10, "#b0b0b0"), (20, "#00bcd4"), (50, "#9c27b0"), (200, "#f44336")):
         sma = df["close"].rolling(period).mean()
         fig.add_trace(
-            go.Scatter(x=df.index, y=sma, line=dict(width=1, color=color, dash="dot"), name=f"SMA{period}")
-        )
+            go.Scatter(x=df.index, y=sma, line=dict(width=1, color=color, dash="dot"), name=f"SMA{period}"), row=1, col=1)
 
     if marker_date is not None and marker_date in df.index:
-        fig.add_vline(x=marker_date, line_dash="dash", line_color="green", annotation_text="signal day")
+        # Two explicit calls rather than row="all": that variant works, but
+        # emits one annotation PER row, leaving a second "signal day" label
+        # floating over the volume bars. Row 2 gets the line without a label.
+        fig.add_vline(
+            x=marker_date, line_dash="dash", line_color="green",
+            annotation_text="signal day", row=1, col=1,
+        )
+        fig.add_vline(x=marker_date, line_dash="dash", line_color="green", row=2, col=1)
 
         if setup_key and settings is not None and setup_key in PATTERN_WINDOW_FIELDS:
             setup_settings = getattr(settings, SETUP_REGISTRY[setup_key]["settings_attr"])
@@ -746,8 +845,7 @@ def plot_symbol(
                 start_loc = max(marker_loc - int(window_days), 0)
                 fig.add_vrect(
                     x0=df.index[start_loc], x1=marker_date, fillcolor=color, line_width=0,
-                    annotation_text=label, annotation_position="top left",
-                )
+                    annotation_text=label, annotation_position="top left", row=1, col=1)
 
         if row is not None:
             for field in RESISTANCE_FIELDS:
@@ -755,8 +853,7 @@ def plot_symbol(
                 if value is not None and pd.notna(value):
                     fig.add_hline(
                         y=value, line_dash="dot", line_color="yellow",
-                        annotation_text=f"{field} = {value:.2f}", annotation_position="right",
-                    )
+                        annotation_text=f"{field} = {value:.2f}", annotation_position="right", row=1, col=1)
                     break
 
         # An explicit marker right on the breakout candle -- dashed lines
@@ -774,8 +871,7 @@ def plot_symbol(
                 textfont=dict(color="lime"),
                 name="Breakout day",
                 showlegend=False,
-            )
-        )
+            ), row=1, col=1)
 
         # Entry/stop/target zone -- the same ADR-based stop and R-multiple
         # target the backtest engine actually uses, so "where to sell" on
@@ -805,21 +901,18 @@ def plot_symbol(
                         marker=dict(symbol="diamond", size=12, color="cyan", line=dict(width=1, color="black")),
                         name="Entry" + (" (projected)" if is_projected else ""),
                         showlegend=False,
-                    )
-                )
+                    ), row=1, col=1)
                 fig.add_hline(
                     y=stop_price, line_dash="dash", line_color="red",
-                    annotation_text=f"Stop {stop_price:.2f}", annotation_position="bottom right",
-                )
+                    annotation_text=f"Stop {stop_price:.2f}", annotation_position="bottom right", row=1, col=1)
                 fig.add_hline(
                     y=target_price, line_dash="dash", line_color="mediumseagreen",
                     annotation_text=f"Target {target_price:.2f} ({settings.backtest.partial_profit_r_multiple:.1f}R)",
-                    annotation_position="top right",
-                )
+                    annotation_position="top right", row=1, col=1)
                 lo, hi = sorted([stop_price, entry_price])
-                fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(255,0,0,0.06)", line_width=0)
+                fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(255,0,0,0.06)", line_width=0, row=1, col=1)
                 lo, hi = sorted([entry_price, target_price])
-                fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(60,179,113,0.08)", line_width=0)
+                fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(60,179,113,0.08)", line_width=0, row=1, col=1)
 
         # Realized paper-trade outcome -- draws the ACTUAL entry/stop/target/
         # partial/exit from a real simulated Trade result, passed directly by
@@ -835,18 +928,15 @@ def plot_symbol(
                     x=[entry_date], y=[entry_price], mode="markers",
                     marker=dict(symbol="diamond", size=12, color="cyan", line=dict(width=1, color="black")),
                     name="Entry", showlegend=False,
-                )
-            )
+                ), row=1, col=1)
             if pd.notna(stop_price):
                 fig.add_hline(
                     y=stop_price, line_dash="dash", line_color="red",
-                    annotation_text=f"Stop {stop_price:.2f}", annotation_position="bottom right",
-                )
+                    annotation_text=f"Stop {stop_price:.2f}", annotation_position="bottom right", row=1, col=1)
             if pd.notna(target_price):
                 fig.add_hline(
                     y=target_price, line_dash="dash", line_color="mediumseagreen",
-                    annotation_text=f"Target {target_price:.2f}", annotation_position="top right",
-                )
+                    annotation_text=f"Target {target_price:.2f}", annotation_position="top right", row=1, col=1)
             if pd.notna(partial_date) and pd.notna(partial_price):
                 fig.add_trace(
                     go.Scatter(
@@ -854,8 +944,7 @@ def plot_symbol(
                         marker=dict(symbol="diamond", size=13, color="orange", line=dict(width=1, color="black")),
                         text=["Sold half"], textposition="bottom center", textfont=dict(color="orange"),
                         name="Partial exit", showlegend=False,
-                    )
-                )
+                    ), row=1, col=1)
             if pd.notna(exit_date) and pd.notna(exit_price):
                 r_val = r_multiple if pd.notna(r_multiple) else 0
                 exit_color = "lime" if r_val > 0 else ("red" if r_val < 0 else "gray")
@@ -865,13 +954,21 @@ def plot_symbol(
                         marker=dict(symbol="x", size=14, color=exit_color, line=dict(width=1, color="black")),
                         text=[exit_reason or "exit"], textposition="top center", textfont=dict(color=exit_color),
                         name="Exit", showlegend=False,
-                    )
-                )
+                    ), row=1, col=1)
 
     fig.update_layout(
         title=dict(text=chart_title, font=dict(size=13)),
-        height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=50, b=10),
+        # 450 -> 560 so the price pane keeps roughly the height it had and
+        # the volume pane is genuinely additive rather than a squeeze.
+        height=560,
+        xaxis_rangeslider_visible=False,
+        # Bottom margin up from 10: the date labels now sit under row 2.
+        margin=dict(l=10, r=10, t=50, b=28),
+        bargap=0,  # volume bars butt together, like a real volume pane
     )
+    # shared_xaxes=True already hides row 1's tick labels and links the zoom,
+    # so only the volume axis needs styling. "~s" renders 12,400,000 as 12M.
+    fig.update_yaxes(title_text="Vol", title_font=dict(size=10), tickformat="~s", row=2, col=1)
     return fig
 
 
@@ -1010,16 +1107,69 @@ with tab_designer:
             s.min_segment_depth_pct = st.slider("Min per-pullback depth %", 1.0, 20.0, float(s.min_segment_depth_pct), 1.0, key=f"d_ab_mind_{st.session_state.settings_version}")
             s.max_segment_depth_pct = st.slider("Max per-pullback depth %", 10.0, 40.0, float(s.max_segment_depth_pct), 1.0, key=f"d_ab_maxd_{st.session_state.settings_version}")
             s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_ab_vol_{st.session_state.settings_version}")
-        else:  # high_tight_flag
+        elif setup_choice == "high_tight_flag":
             s.min_run_up_pct = st.slider("Min run-up %", 50.0, 300.0, float(s.min_run_up_pct), 5.0, key=f"d_htf_runup_{st.session_state.settings_version}")
             s.max_flag_depth_pct = st.slider("Max flag depth %", 5.0, 40.0, float(s.max_flag_depth_pct), 1.0, key=f"d_htf_flag_{st.session_state.settings_version}")
             s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_htf_vol_{st.session_state.settings_version}")
+        elif setup_choice == "momentum_burst":
+            st.caption("Bonde's core scan -- these three are his, unchanged since 2014.")
+            s.min_gain_pct = st.slider("Min gain on the burst day %", 2.0, 12.0, float(s.min_gain_pct), 0.5, key=f"d_mb_gain_{st.session_state.settings_version}")
+            s.min_dollar_volume = st.number_input("Min dollar volume", 0, 1_000_000_000, int(s.min_dollar_volume), 500_000, key=f"d_mb_dv_{st.session_state.settings_version}")
+            s.min_close_position_pct = st.slider("Min close position in the day's range %", 0.0, 100.0, float(s.min_close_position_pct), 5.0, key=f"d_mb_closepos_{st.session_state.settings_version}", help="100 = closed exactly on the high. Bonde: 'stock should close near high on breakout day'.")
+            st.caption("Quality checks -- his 8-point checklist, loosened so they exclude clear violations rather than acting as an AND-chain.")
+            s.min_range_expansion_ratio = st.slider("Min range expansion (x the 5-day avg)", 1.0, 3.0, float(s.min_range_expansion_ratio), 0.05, key=f"d_mb_rexp_{st.session_state.settings_version}")
+            s.consolidation_days = st.slider("Consolidation length (days)", 3, 30, int(s.consolidation_days), 1, key=f"d_mb_cons_{st.session_state.settings_version}")
+            s.max_consolidation_range_pct = st.slider("Max consolidation range %", 5.0, 50.0, float(s.max_consolidation_range_pct), 1.0, key=f"d_mb_range_{st.session_state.settings_version}")
+            s.max_base_daily_move_pct = st.slider("Max single-day move inside the base %", 3.0, 25.0, float(s.max_base_daily_move_pct), 1.0, key=f"d_mb_basemove_{st.session_state.settings_version}")
+            s.min_efficiency_ratio = st.slider("Min prior-trend linearity (0-1)", 0.0, 0.8, float(s.min_efficiency_ratio), 0.05, key=f"d_mb_eff_{st.session_state.settings_version}", help="Kaufman efficiency ratio over the advance BEFORE the base: net move divided by total distance travelled. 1.0 is a straight line, 0.1 is the same net move via chop.")
+            s.require_volume_dryup = st.checkbox("Require volume dry-up in the base", value=bool(s.require_volume_dryup), key=f"d_mb_dryup_{st.session_state.settings_version}")
+            s.volume_dryup_ratio_max = st.slider("Max base volume vs the 50-day average", 0.3, 2.0, float(s.volume_dryup_ratio_max), 0.05, key=f"d_mb_dryupr_{st.session_state.settings_version}")
+            s.require_quiet_prior_day = st.checkbox("Require a narrow or down day before the burst", value=bool(s.require_quiet_prior_day), key=f"d_mb_quiet_{st.session_state.settings_version}")
+            s.max_consecutive_up_days = st.slider("Skip after this many consecutive up days", 1, 8, int(s.max_consecutive_up_days), 1, key=f"d_mb_consec_{st.session_state.settings_version}", help="'Avoid day 2/3 entries' -- by then the burst is underway and your stop sits too far below to be worth taking.")
+            s.min_adr_pct = st.slider("Min ADR %", 0.5, 12.0, float(s.min_adr_pct), 0.5, key=f"d_mb_adr_{st.session_state.settings_version}")
+            s.min_rs_rating = st.slider("Min RS rating", 0, 99, int(s.min_rs_rating), 1, key=f"d_mb_rs_{st.session_state.settings_version}")
+        else:
+            # Reached only if a setup is registered without its own branch
+            # above. Previously this was `else: # high_tight_flag`, which
+            # silently rendered HTF's sliders bound to whatever settings
+            # object the new setup actually uses -- edits went to fields that
+            # didn't exist, or worse, to ones that did and meant something else.
+            st.info(
+                f"No parameter controls have been written for **{spec['label']}** yet. "
+                "It still scans and backtests using its configured defaults; edit them in "
+                "config/default_settings.yaml, or add an `elif` branch here."
+            )
 
         with st.expander(f"What does {spec['label']} mean?"):
             st.write(PATTERN_EXPLANATIONS.get(setup_choice, "No explanation available."))
 
         st.markdown("**Backtest mechanics**")
         bt = settings.backtest
+        bt.entry_mode = st.selectbox(
+            "Entry execution", ["stop_buy", "next_open"], index=0 if bt.entry_mode == "stop_buy" else 1,
+            format_func=lambda v: (
+                "Stop-buy above the signal day's high (how you actually trade)" if v == "stop_buy"
+                else "Fill at the next open, unconditionally (legacy)"
+            ),
+            key=f"d_bt_entrymode_{st.session_state.settings_version}",
+            help="Stop-buy only fills when price actually trades through the trigger, so signals that opened "
+            "and immediately rolled over produce no trade at all -- which is most of the point. Expect a "
+            "meaningfully lower trade count than 'next open'; that drop IS the filter working.",
+        )
+        if bt.entry_mode == "stop_buy":
+            bt.entry_buffer_pct = st.slider(
+                "Trigger buffer above the high (%)", 0.0, 1.0, float(bt.entry_buffer_pct), 0.01,
+                key=f"d_bt_buffer_{st.session_state.settings_version}",
+                help="How far beyond the signal day's high the resting order sits, so a single tick touching "
+                "the exact high doesn't fill you on a level that was never really taken out.",
+            )
+            bt.max_gap_fill_pct = st.slider(
+                "Stand aside if it gaps more than this % past the trigger (0 = take any gap)", 0.0, 15.0,
+                float(bt.max_gap_fill_pct), 0.5, key=f"d_bt_maxgap_{st.session_state.settings_version}",
+                help="The nearest daily-bar substitute for his opening-range-high filter: he skips a stock "
+                "that gaps up and then fails to clear its early high. A resting order can't see that, but it "
+                "can at least refuse a fill far above where the setup justified.",
+            )
         bt.stop_mode = st.selectbox(
             "Stop placement", ["low_of_signal_day", "adr_multiple"], index=0 if bt.stop_mode == "low_of_signal_day" else 1,
             format_func=lambda v: "Low of signal day (Qullamaggie's rule, capped at the ADR)" if v == "low_of_signal_day" else "Pure ADR multiple from entry",
@@ -1029,6 +1179,28 @@ with tab_designer:
         bt.stop_adr_multiple = st.slider(
             "Stop distance cap (x ADR)", 0.25, 3.0, float(bt.stop_adr_multiple), 0.25, key=f"d_bt_stop_{st.session_state.settings_version}",
             help="With 'Low of signal day', this is a cap -- the stop never ends up farther than this many ADRs away.",
+        )
+        bt.stop_exceeds_adr_action = st.selectbox(
+            "When the signal day's low is further than that cap",
+            ["cap", "skip"], index=0 if bt.stop_exceeds_adr_action == "cap" else 1,
+            format_func=lambda v: (
+                "Tighten the stop to the cap" if v == "cap"
+                else "Skip the trade (his actual rule)"
+            ),
+            key=f"d_bt_stopaction_{st.session_state.settings_version}",
+            help="Tightening keeps the trade but moves the stop off the structure, so an ordinary pullback "
+            "into the base takes you out. Skipping matches \"the stop should be no more than the ATR\" -- if "
+            "it would be wider, the setup isn't takeable at acceptable risk. This binds far more often under "
+            "stop-buy entries, because the higher fill widens the distance to the signal day's low.",
+        )
+        bt.check_same_bar_stop = st.checkbox(
+            "Also check whether the entry bar itself hit the stop",
+            value=bool(bt.check_same_bar_stop), key=f"d_bt_samebar_{st.session_state.settings_version}",
+            help="Off by default, and it will LOWER your win rate. Exits are processed before entries, so a "
+            "fill that reverses through its own stop the same session is currently carried to the next day "
+            "for free. Under stop-buy you enter near the top of the bar's range, which makes that more "
+            "likely -- in synthetic testing it affected about a third of fills. Turning this on is more "
+            "honest but pessimistic: a daily bar can't tell you whether the low came before or after your fill.",
         )
         bt.max_position_pct_of_equity = st.slider(
             "Max position size (% of equity)", 5.0, 100.0, float(bt.max_position_pct_of_equity), 5.0, key=f"d_bt_maxpos_pct_{st.session_state.settings_version}",
@@ -1194,14 +1366,40 @@ with tab_scanner:
                 "simply haven't triggered yet, within a chosen % of the resistance/pivot level -- a watchlist "
                 "for what might move next, not just what already did."
             )
-            pivot_distance = st.slider(
-                "Max distance from pivot (%)", 1.0, 20.0, 8.0, 1.0, key="pivot_distance_pct",
-                help="How close (in either direction) to the breakout level counts as 'approaching'.",
-            )
-            if st.button("Find stocks approaching a pivot"):
-                st.session_state.approaching_df = find_approaching_pivot(
-                    settings, history, as_of=str(as_of), max_distance_pct=pivot_distance
+            col_pivot_dist, col_pivot_pre = st.columns([2, 1])
+            with col_pivot_dist:
+                pivot_distance = st.slider(
+                    "Max distance from pivot (%)", 1.0, 20.0, 8.0, 1.0, key="pivot_distance_pct",
+                    help="How close (in either direction) to the breakout level counts as 'approaching'.",
                 )
+            with col_pivot_pre:
+                pivot_prefilter = st.checkbox(
+                    "Momentum leaders only", value=True, key="pivot_prefilter",
+                    help="Narrow to the momentum shortlist first, exactly as Run Scan does. This check runs "
+                    "every setup at every auto-detected size against every symbol -- roughly 0.2s each -- so "
+                    "on a full universe it's the difference between seconds and several minutes. There's also "
+                    "little point ranking bases in stocks that aren't going anywhere.",
+                )
+            if st.button("Find stocks approaching a pivot"):
+                pivot_history = history
+                if pivot_prefilter:
+                    shortlist = momentum_shortlist(
+                        history, settings.universe.momentum_timeframes_days, settings.universe.momentum_top_pct
+                    )
+                    pivot_history = {s: history[s] for s in shortlist if s in history} or history
+                pivot_progress = st.progress(0.0, text="Checking bases...")
+
+                def _on_pivot_progress(i, n, sym):
+                    pivot_progress.progress(i / n, text=f"Checking bases... {sym} ({i}/{n})")
+
+                try:
+                    st.session_state.approaching_df = find_approaching_pivot(
+                        settings, pivot_history, as_of=str(as_of), max_distance_pct=pivot_distance,
+                        on_progress=_on_pivot_progress,
+                    )
+                finally:
+                    pivot_progress.empty()
+                st.caption(f"Checked {len(pivot_history)} symbol(s).")
             approaching_df = st.session_state.get("approaching_df")
             if approaching_df is not None and not approaching_df.empty:
                 st.caption("Sorted closest-to-triggering first. Negative pct_to_pivot means it's already just above the level, waiting on volume to confirm.")
@@ -1345,16 +1543,50 @@ with tab_scanner:
         if prefilter_momentum and st.session_state.get("scan_shortlist_size") is not None:
             st.caption(f"Scanned {st.session_state.scan_shortlist_size} momentum-leading symbol(s), not the full universe.")
         results = st.session_state.last_scan
+        # Quality gate + cap, applied AFTER the scan. The scan itself is
+        # deliberately wide (see the note on BreakoutSettings' defaults);
+        # this is where you tighten, because a star score ranks across setups
+        # in a way each setup's own threshold never could. The controls are
+        # rendered BEFORE the empty check on purpose -- if the filter clears
+        # the list, you still need the slider on screen to lower it again.
+        if not results.empty and "stars" in results.columns:
+            star_counts = results["stars"].value_counts()
+            available = "  ".join(f"{int(k)}★: {v}" for k, v in sorted(star_counts.items(), reverse=True))
+            col_stars, col_topn = st.columns([2, 1])
+            with col_stars:
+                min_stars = st.slider(
+                    "Minimum quality (stars)", 0, 6, 3, 1, key="scanner_min_stars",
+                    help="A 0-6.5 score across seven of Qullamaggie's documented criteria -- prior move, above "
+                    "a rising 50-day, RS, base tightness, volume dry-up then expansion, moving-average "
+                    "alignment, and linearity -- bucketed into 1-6 stars. Note the star SCALE is this app's "
+                    "encoding of those criteria; he doesn't publish a numeric grade himself.",
+                )
+            with col_topn:
+                top_n = st.number_input(
+                    "Show top", 1, 200, 10, 1, key="scanner_top_n",
+                    help="Cap on how many matches to display, after the star filter. The list is already "
+                    "ranked best-first, so this only trims the tail.",
+                )
+            st.caption(f"Matched today, by quality -- {available}")
+            filtered = results[results["stars"].fillna(0) >= min_stars]
+            if filtered.empty:
+                st.warning(
+                    f"Nothing at {min_stars}★ or better today. Lower the bar above to see what did match -- "
+                    "on a quiet day the honest answer may be that there's nothing here worth taking."
+                )
+            results = filtered.head(int(top_n))
+
         if results.empty:
-            st.warning("No matches yet -- click 'Run Scan', or loosen thresholds in the Designer tab.")
+            if st.session_state.last_scan.empty:
+                st.warning("No matches yet -- click 'Run Scan', or loosen thresholds in the Designer tab.")
         else:
             st.caption(
-                "Sorted by RS rating (momentum/leadership) first, then setup score -- grouped below by setup "
-                "so each table only shows columns that actually apply to that pattern (a Cup with Handle match "
-                "was never going to have a Double Bottom's columns, and vice versa). The rank column reflects "
-                "the overall cross-setup priority, so you can still tell what matters most at a glance."
+                "Ranked by star quality first, then RS rating (momentum/leadership), then the setup's own score "
+                "-- grouped below by setup so each table only shows columns that actually apply to that pattern "
+                "(a Cup with Handle match was never going to have a Double Bottom's columns, and vice versa). "
+                "The rank column reflects the overall cross-setup priority."
             )
-            results_ranked = results.copy()
+            results_ranked = results.reset_index(drop=True).copy()
             results_ranked.insert(0, "rank", results_ranked.index + 1)
             # Show setups in the order their best (highest-priority) match
             # appears in the overall ranking, not alphabetically -- the
@@ -1911,7 +2143,17 @@ with tab_backtest:
             "flat_base": ["max_range_pct", "min_prior_move_pct", "breakout_volume_ratio_min"],
             "ascending_base": ["max_segment_depth_pct", "breakout_volume_ratio_min"],
             "high_tight_flag": ["min_run_up_pct", "max_flag_depth_pct", "breakout_volume_ratio_min"],
-        }[opt_setup]
+            "momentum_burst": ["min_gain_pct", "min_range_expansion_ratio", "max_consolidation_range_pct", "min_efficiency_ratio", "min_rs_rating"],
+        # .get() rather than a raw subscript: a setup registered without an
+        # entry here used to raise KeyError at render time and take the whole
+        # tab down. Falling back to every numeric field on its settings object
+        # is a strictly better default than crashing.
+        }.get(opt_setup)
+        if grid_param_options is None:
+            opt_settings_obj = getattr(settings, opt_attr)
+            grid_param_options = [
+                f for f, v in asdict(opt_settings_obj).items() if isinstance(v, (int, float)) and not isinstance(v, bool)
+            ]
 
         param_grid = {}
         for p in grid_param_options:
@@ -2956,6 +3198,230 @@ with tab_stopcalc:
                 render_add_to_watchlist_button(sc_symbol, "stopcalc")
             with col_sc_pt:
                 render_add_to_paper_trading_button(sc_symbol, sc_df.index[-1], "stopcalc")
+
+
+# --------------------------------------------------------------------------
+# Tab: Tomorrow's Orders -- ready-to-place stop-buy tickets
+#
+# The point of this tab: everything else in the app tells you WHAT matched.
+# This tells you what to actually put in the broker before the open, with the
+# trigger, the stop, and the share count already worked out -- because the
+# whole premise of trading this way is that you won't be watching intraday.
+# --------------------------------------------------------------------------
+with tab_orders:
+    st.subheader("Tomorrow's orders")
+    st.caption(
+        "Turns the latest scan into stop-buy tickets you can place before the open. Every number here comes "
+        "from the same code the backtest uses to fill and stop a trade, so what you place is what was tested."
+    )
+
+    if not history:
+        st.info("Load data from the sidebar first, then run a scan on the Scanner tab.")
+    elif st.session_state.last_scan.empty:
+        st.info("No scan results yet -- run a scan on the Scanner tab first.")
+    else:
+        scan_all = st.session_state.last_scan
+
+        col_acct, col_risk, col_stars2 = st.columns(3)
+        with col_acct:
+            account_size = st.number_input(
+                "Account size ($)", 1_000, 100_000_000, int(settings.backtest.initial_capital), 1_000,
+                key="orders_account",
+            )
+        with col_risk:
+            risk_pct = st.slider(
+                "Risk per trade (%)", 0.1, 3.0, float(settings.backtest.risk_pct_per_trade), 0.05,
+                key="orders_risk_pct",
+                help="Qullamaggie's own answer: \"most of the time 0.3-0.5%, rarely more than 1%.\"",
+            )
+        with col_stars2:
+            orders_min_stars = st.slider("Minimum stars", 0, 6, 4, 1, key="orders_min_stars")
+
+        setup_labels = sorted(scan_all["setup"].unique().tolist())
+        # Momentum Burst and Breakout by default: the two setups whose hold
+        # period and entry mechanics actually match placing a stop-buy and
+        # holding 3-5 days. The O'Neil patterns are built for multi-week
+        # holds -- available here, just not the default.
+        preferred = [
+            l for l in setup_labels
+            if l.startswith("Momentum Burst") or l == "Breakout"
+        ] or setup_labels
+        chosen_setups = st.multiselect(
+            "Setups to draw from", setup_labels, default=preferred, key="orders_setups",
+            help="Defaults to Momentum Burst and Breakout -- the two with a 3-5 day horizon. The O'Neil "
+            "patterns are designed for multi-week holds, so they'll behave differently on this timetable.",
+        )
+
+        picks = scan_all[scan_all["setup"].isin(chosen_setups)]
+        if "stars" in picks.columns:
+            picks = picks[picks["stars"].fillna(0) >= orders_min_stars]
+
+        if picks.empty:
+            st.warning(
+                f"Nothing at {orders_min_stars}★ or better in the selected setups. Lower the bar, widen the "
+                "setups, or accept that today has nothing worth an order -- the last one is a real answer."
+            )
+        else:
+            bt = settings.backtest
+            order_rows, skipped_rows = [], []
+            for _, r in picks.iterrows():
+                sym = r["symbol"]
+                if sym not in history or history[sym].empty:
+                    skipped_rows.append({"symbol": sym, "reason": "not loaded"})
+                    continue
+                sdf = history[sym]
+                sig_date = pd.Timestamp(r["date"])
+                if sig_date not in sdf.index:
+                    skipped_rows.append({"symbol": sym, "reason": "signal date not in history"})
+                    continue
+                bar = sdf.loc[sig_date]
+                adr_at = compute_adr_pct_at(sdf, sig_date)
+                signal_bar = {
+                    "high": float(bar["high"]), "low": float(bar["low"]),
+                    "adr_pct": adr_at, "vol_avg_50": None,
+                }
+                # entry_bar=None: tomorrow hasn't happened. The trigger, stop
+                # and size are all knowable now; only the fill isn't, so the
+                # plan assumes a fill at the trigger.
+                plan = resolve_entry_and_stop(bt, "long", signal_bar, None)
+                if not plan.tradeable:
+                    skipped_rows.append({"symbol": sym, "reason": plan.skip_reason})
+                    continue
+
+                avg_vol = float(sdf["volume"].tail(50).mean()) if "volume" in sdf.columns else None
+                sizing = compute_stop_and_size(
+                    entry_price=plan.entry_price, signal_low=float(bar["low"]), signal_high=float(bar["high"]),
+                    adr_pct=adr_at, side="long", stop_mode=bt.stop_mode,
+                    stop_adr_multiple=bt.stop_adr_multiple, risk_pct_per_trade=risk_pct,
+                    equity=float(account_size),
+                    max_position_pct_of_equity=bt.max_position_pct_of_equity,
+                    max_position_pct_of_avg_volume=bt.max_position_pct_of_avg_volume,
+                    avg_volume=avg_vol,
+                    stop_exceeds_adr_action=bt.stop_exceeds_adr_action,
+                    stop_distance=plan.stop_distance,
+                )
+                if sizing.get("error"):
+                    skipped_rows.append({"symbol": sym, "reason": sizing["error"]})
+                    continue
+
+                order_rows.append({
+                    "symbol": sym,
+                    "setup": r["setup"],
+                    "★": int(r["stars"]) if pd.notna(r.get("stars")) else None,
+                    "stop-buy trigger": round(plan.trigger_price, 2) if plan.trigger_price else None,
+                    "limit cap": round(plan.limit_cap_price, 2) if plan.limit_cap_price else None,
+                    "stop": round(plan.stop_price, 2),
+                    "risk/share": round(plan.stop_distance, 2),
+                    "shares": sizing["shares"],
+                    "position $": round(sizing["position_value"], 0),
+                    "% of acct": round(sizing["position_value"] / account_size * 100.0, 1),
+                    "risk $": round(sizing["total_risk_dollars"], 0),
+                    "sell-half at": round(plan.target_price, 2),
+                    "ADR%": round(adr_at, 1) if adr_at else None,
+                    "RS": round(r["rs_rating"], 0) if pd.notna(r.get("rs_rating")) else None,
+                    "days to earnings": r.get("days_to_earnings"),
+                    "capped by": ", ".join(sizing["capped_by"]) or "",
+                })
+
+            if not order_rows:
+                st.warning("Every candidate was filtered out at the order stage -- see the skipped list below.")
+            else:
+                orders_df = pd.DataFrame(order_rows)
+                total_risk = orders_df["risk $"].sum()
+                total_pos = orders_df["position $"].sum()
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Orders", len(orders_df))
+                c2.metric("Total at risk", f"${total_risk:,.0f}", f"{total_risk / account_size * 100:.1f}% of account")
+                c3.metric("Total position value", f"${total_pos:,.0f}", f"{total_pos / account_size * 100:.0f}% of account")
+                if total_risk / account_size * 100 > 6:
+                    st.warning(
+                        f"These orders risk {total_risk / account_size * 100:.1f}% of the account if every one "
+                        "fills and every one stops out. They won't all fill -- but they can all fill on the same "
+                        "strong morning, which is exactly when you'd least expect to be at full risk."
+                    )
+                st.dataframe(orders_df, use_container_width=True, height=min(80 + 35 * len(orders_df), 420))
+                gap_note = (
+                    f"a **limit cap** column is shown, so you can place a stop-LIMIT and refuse anything worse"
+                    if bt.max_gap_fill_pct > 0 else
+                    "**max gap fill %** is currently 0 in the Designer tab, so a gap of any size gets filled"
+                )
+                st.caption(
+                    f"The stop, share count and sell-half target are exact. The **trigger** is exact too, but "
+                    f"the price you actually get is not: if the stock opens *above* your trigger, you fill at "
+                    f"the open, not the trigger. Measured on a 5% gap that's about 3% worse than the numbers "
+                    f"above -- and the stop/risk figures shift with it. Right now {gap_note}."
+                )
+                st.download_button(
+                    "Download as CSV", orders_df.to_csv(index=False).encode(),
+                    file_name=f"orders_{as_of}.csv", mime="text/csv", key="orders_csv",
+                )
+
+            if skipped_rows:
+                with st.expander(f"Skipped ({len(skipped_rows)}) -- and why"):
+                    st.caption(
+                        "These matched the scan but didn't become orders. Worth reading rather than ignoring: "
+                        "\"anti-chase\" and \"stop wider than the ADR cap\" are both the system correctly "
+                        "declining a trade, not a failure."
+                    )
+                    st.dataframe(pd.DataFrame(skipped_rows), use_container_width=True)
+
+        st.divider()
+        st.markdown("**The plan once you're filled**")
+        st.info(
+            f"1. Sell **{settings.backtest.partial_profit_fraction:.0%}** into strength at the "
+            f"**sell-half** price above (≈{settings.backtest.partial_profit_r_multiple:.0f}R), or after "
+            f"**{settings.backtest.partial_profit_max_days} days**, whichever comes first.\n\n"
+            f"2. Move the stop on the rest to **breakeven**.\n\n"
+            f"3. Trail the remainder with the **{settings.backtest.trail_ema_period}-day "
+            f"{settings.backtest.trail_ma_type.upper()}**, exiting on the first **close** below it. "
+            "Closes only -- an intraday poke below the average doesn't count.\n\n"
+            "That's the whole exit. The hard part isn't knowing it, it's doing it on the days it feels wrong."
+        )
+
+        with st.expander("⚠️ How a stop-buy differs from what Qullamaggie actually does"):
+            st.markdown(
+                "He doesn't place resting premarket orders. He watches the open and buys the **opening range "
+                "high** -- the stock has to take out its first 1-, 5- or 60-minute high before he'll touch it. "
+                "If it gaps up and then fails to clear that level, **he skips the trade entirely**.\n\n"
+                "That filter is a real part of the edge, and a resting stop-buy doesn't have it: it fills you "
+                "on exactly those failed gaps. The closest substitute here is **max gap fill %** in the "
+                "Designer tab, which stands aside when the stock opens too far past your trigger. It is a "
+                "blunter tool than watching the open -- worth knowing, not worth pretending otherwise.\n\n"
+                "The other honest gap: your stop can't be \"the low of the day\" when you place the order "
+                "before the day exists. What's used instead is the **signal day's low**, capped at "
+                f"**{settings.backtest.stop_adr_multiple:.1f}× ADR**."
+            )
+
+        with st.expander("🤔 Which system should I actually trade?"):
+            st.markdown(
+                "An honest read for how you trade -- end-of-day data, premarket stop-buys, a 3-5 day hold, "
+                "no intraday screen time:\n\n"
+                "**1. Momentum Burst** — built for exactly this. Bonde's own hold is \"3 to 5 days,\" the scan "
+                "is end-of-day, and the trigger is simply the signal day's high, which is what a stop-buy "
+                "wants. Highest frequency of anything here, so it's the one that can actually give you picks "
+                "most days. The catch: smaller wins per trade. Its edge comes from repetition, which makes "
+                "execution discipline matter more than stock selection.\n\n"
+                "**2. Breakout at 4★+** — much bigger winners when they work, far fewer of them. Best used as "
+                "the conviction trade you size up on, not the one you rely on for daily flow. See the warning "
+                "above about the opening-range filter you're giving up.\n\n"
+                "**3. Episodic Pivot** — the best reward-to-risk of the three, but it clusters into 3-4 week "
+                "windows around earnings each quarter, so it can't be a daily source. Its strongest criterion "
+                "(trading a full day's average volume in the first 15-20 minutes) is intraday-only and can't "
+                "be checked here at all.\n\n"
+                "**4. The O'Neil patterns** (cup with handle, flat base, double bottom, ascending base, high "
+                "tight flag) — these will produce the most matches, and that's the problem. They're built for "
+                "multi-week to multi-month holds. On a 3-5 day clock they mostly add count without adding "
+                "edge, which is why they're off by default on this tab.\n\n"
+                "**5. Parabolic Short** — wrong for this workflow outright. Intraday-timed entries, and "
+                "overnight gap risk on a short is the one thing an unattended account genuinely cannot "
+                "absorb.\n\n"
+                "---\n\n"
+                "**Two caveats worth more than the ranking above.** First, the Backtest tab can now settle "
+                "this with evidence rather than opinion — it models your actual stop-buy execution, so run "
+                "the comparison yourself. Second, every backtest here runs on a momentum-pre-filtered "
+                "universe of stocks that still exist today. That flatters every strategy equally, so treat "
+                "the numbers as a ranking between them, never as returns you should expect."
+            )
 
 
 # --------------------------------------------------------------------------
