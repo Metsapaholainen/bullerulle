@@ -4,6 +4,11 @@ commission_per_share: 0.0
 slippage_pct: 0.1
 stop_mode: low_of_signal_day
 stop_adr_multiple: 1.0
+stop_exceeds_adr_action: cap
+entry_mode: stop_buy
+entry_buffer_pct: 0.05
+max_gap_fill_pct: 0.0
+check_same_bar_stop: false
 partial_profit_r_multiple: 1.0
 partial_profit_fraction: 0.5
 partial_profit_max_days: 5
