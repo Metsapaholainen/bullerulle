@@ -43,6 +43,16 @@ trades:
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
   notes: ''
+  entry_date: '2026-08-03'
+  entry_price: 35.024989999999995
+  partial_date: null
+  partial_price: null
+  exit_date: '2026-08-04'
+  exit_price: 33.519165479041845
+  exit_reason: stop
+  r_multiple: -1.0
+  pnl: -85.98572167804474
+  status: Loss
 - symbol: GCT
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
