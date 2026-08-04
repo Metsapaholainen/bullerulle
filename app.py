@@ -3365,63 +3365,93 @@ with tab_orders:
                     )
                     st.dataframe(pd.DataFrame(skipped_rows), use_container_width=True)
 
-        st.divider()
-        st.markdown("**The plan once you're filled**")
-        st.info(
-            f"1. Sell **{settings.backtest.partial_profit_fraction:.0%}** into strength at the "
-            f"**sell-half** price above (≈{settings.backtest.partial_profit_r_multiple:.0f}R), or after "
-            f"**{settings.backtest.partial_profit_max_days} days**, whichever comes first.\n\n"
-            f"2. Move the stop on the rest to **breakeven**.\n\n"
-            f"3. Trail the remainder with the **{settings.backtest.trail_ema_period}-day "
-            f"{settings.backtest.trail_ma_type.upper()}**, exiting on the first **close** below it. "
-            "Closes only -- an intraday poke below the average doesn't count.\n\n"
-            "That's the whole exit. The hard part isn't knowing it, it's doing it on the days it feels wrong."
+    # Reference material, deliberately OUTSIDE the has-results branch: the
+    # exit plan and the system comparison are worth reading on a day with no
+    # picks at all -- arguably especially then.
+    st.divider()
+    st.markdown("**The plan once you're filled**")
+    st.info(
+        f"1. Sell **{settings.backtest.partial_profit_fraction:.0%}** into strength at the "
+        f"**sell-half** target (≈{settings.backtest.partial_profit_r_multiple:.0f}R above entry), or after "
+        f"**{settings.backtest.partial_profit_max_days} days**, whichever comes first.\n\n"
+        f"2. Move the stop on the rest to **breakeven**.\n\n"
+        f"3. Trail the remainder with the **{settings.backtest.trail_ema_period}-day "
+        f"{settings.backtest.trail_ma_type.upper()}**, exiting on the first **close** below it. "
+        "Closes only -- an intraday poke below the average doesn't count.\n\n"
+        "That's the whole exit. The hard part isn't knowing it, it's doing it on the days it feels wrong."
+    )
+
+    with st.expander("⚠️ How a stop-buy differs from what Qullamaggie actually does"):
+        st.markdown(
+            "He doesn't place resting premarket orders. He watches the open and buys the **opening range "
+            "high** -- the stock has to take out its first 1-, 5- or 60-minute high before he'll touch it. "
+            "If it gaps up and then fails to clear that level, **he skips the trade entirely**.\n\n"
+            "That filter is a real part of the edge, and a resting stop-buy doesn't have it: it fills you "
+            "on exactly those failed gaps. The closest substitute here is **max gap fill %** in the "
+            "Designer tab, which stands aside when the stock opens too far past your trigger. It is a "
+            "blunter tool than watching the open -- worth knowing, not worth pretending otherwise.\n\n"
+            "The other honest gap: your stop can't be \"the low of the day\" when you place the order "
+            "before the day exists. What's used instead is the **signal day's low**, capped at "
+            f"**{settings.backtest.stop_adr_multiple:.1f}× ADR**."
         )
 
-        with st.expander("⚠️ How a stop-buy differs from what Qullamaggie actually does"):
-            st.markdown(
-                "He doesn't place resting premarket orders. He watches the open and buys the **opening range "
-                "high** -- the stock has to take out its first 1-, 5- or 60-minute high before he'll touch it. "
-                "If it gaps up and then fails to clear that level, **he skips the trade entirely**.\n\n"
-                "That filter is a real part of the edge, and a resting stop-buy doesn't have it: it fills you "
-                "on exactly those failed gaps. The closest substitute here is **max gap fill %** in the "
-                "Designer tab, which stands aside when the stock opens too far past your trigger. It is a "
-                "blunter tool than watching the open -- worth knowing, not worth pretending otherwise.\n\n"
-                "The other honest gap: your stop can't be \"the low of the day\" when you place the order "
-                "before the day exists. What's used instead is the **signal day's low**, capped at "
-                f"**{settings.backtest.stop_adr_multiple:.1f}× ADR**."
-            )
-
-        with st.expander("🤔 Which system should I actually trade?"):
-            st.markdown(
-                "An honest read for how you trade -- end-of-day data, premarket stop-buys, a 3-5 day hold, "
-                "no intraday screen time:\n\n"
-                "**1. Momentum Burst** — built for exactly this. Bonde's own hold is \"3 to 5 days,\" the scan "
-                "is end-of-day, and the trigger is simply the signal day's high, which is what a stop-buy "
-                "wants. Highest frequency of anything here, so it's the one that can actually give you picks "
-                "most days. The catch: smaller wins per trade. Its edge comes from repetition, which makes "
-                "execution discipline matter more than stock selection.\n\n"
-                "**2. Breakout at 4★+** — much bigger winners when they work, far fewer of them. Best used as "
-                "the conviction trade you size up on, not the one you rely on for daily flow. See the warning "
-                "above about the opening-range filter you're giving up.\n\n"
-                "**3. Episodic Pivot** — the best reward-to-risk of the three, but it clusters into 3-4 week "
-                "windows around earnings each quarter, so it can't be a daily source. Its strongest criterion "
-                "(trading a full day's average volume in the first 15-20 minutes) is intraday-only and can't "
-                "be checked here at all.\n\n"
-                "**4. The O'Neil patterns** (cup with handle, flat base, double bottom, ascending base, high "
-                "tight flag) — these will produce the most matches, and that's the problem. They're built for "
-                "multi-week to multi-month holds. On a 3-5 day clock they mostly add count without adding "
-                "edge, which is why they're off by default on this tab.\n\n"
-                "**5. Parabolic Short** — wrong for this workflow outright. Intraday-timed entries, and "
-                "overnight gap risk on a short is the one thing an unattended account genuinely cannot "
-                "absorb.\n\n"
-                "---\n\n"
-                "**Two caveats worth more than the ranking above.** First, the Backtest tab can now settle "
-                "this with evidence rather than opinion — it models your actual stop-buy execution, so run "
-                "the comparison yourself. Second, every backtest here runs on a momentum-pre-filtered "
-                "universe of stocks that still exist today. That flatters every strategy equally, so treat "
-                "the numbers as a ranking between them, never as returns you should expect."
-            )
+    with st.expander("🤔 Which system should I actually trade?"):
+        st.markdown(
+            "Measured, not guessed. Every long setup was backtested twice on 400 cached symbols over "
+            "2022-08 to 2026-08, once with the old next-open fill and once with **your** stop-buy "
+            "execution. Ranked by expectancy in R under stop-buy:\n"
+        )
+        st.dataframe(
+            pd.DataFrame([
+                {"setup": "Breakout", "trades": 135, "win %": 54.8, "expectancy (R)": 0.473,
+                 "profit factor": 2.15, "max DD %": -14.0},
+                {"setup": "Cup with Handle", "trades": 65, "win %": 50.8, "expectancy (R)": 0.390,
+                 "profit factor": 1.76, "max DD %": -15.1},
+                {"setup": "Ascending Base", "trades": 133, "win %": 51.1, "expectancy (R)": 0.087,
+                 "profit factor": 1.28, "max DD %": -14.6},
+                {"setup": "Double Bottom", "trades": 490, "win %": 42.0, "expectancy (R)": 0.016,
+                 "profit factor": 1.06, "max DD %": -88.3},
+                {"setup": "Flat Base", "trades": 81, "win %": 46.9, "expectancy (R)": -0.059,
+                 "profit factor": 0.90, "max DD %": -10.8},
+                {"setup": "Episodic Pivot", "trades": 3, "win %": 33.3, "expectancy (R)": -0.231,
+                 "profit factor": 0.67, "max DD %": -0.9},
+                {"setup": "Momentum Burst", "trades": 84, "win %": 39.3, "expectancy (R)": -0.233,
+                 "profit factor": 0.62, "max DD %": -17.3},
+            ]),
+            use_container_width=True, hide_index=True,
+        )
+        st.markdown(
+            "**Breakout wins, and it isn't close.** Expectancy 0.47R at a profit factor of 2.15 over 135 "
+            "trades. The reason is visible in the exits: its trailing-stop exits average **+3.6R** while "
+            "its stopped-out trades average -0.29R. The winners run far enough to pay for the losers "
+            "several times over. That is the entire edge, and it means the discipline that matters most "
+            "is *not* cutting a winner early.\n\n"
+            "**Momentum Burst tested negative here, and I'd previously have told you it was your best "
+            "fit.** It isn't, on this evidence. Its trail exits average only +0.75R — the winners never "
+            "get big enough. I checked whether the exit rules were simply wrong for a 3-5 day burst by "
+            "re-running it with faster trails (3/5/8-day) and earlier partials; it stayed negative in "
+            "every variant, so the problem is the entries, not the exits. Plausible reasons: this "
+            "universe skews mid/large-cap while Bonde's method leans on smaller, more volatile names, "
+            "and he treats his scan as a shortlist to judge by eye rather than a mechanical system. "
+            "**Don't trade it on my say-so.** It's kept here because the scan is faithful to his "
+            "published rules and you may want to tune it — not because it's earned a place yet.\n\n"
+            "**Stop-buy execution helped the good setups and exposed the weak ones.** Breakout's "
+            "expectancy nearly doubled (0.249 → 0.473) and Cup with Handle's almost tripled, while "
+            "Double Bottom's and Flat Base's collapsed. Filtering out the signals that never traded "
+            "through their trigger removes noise from a real edge and removes the *illusion* of one "
+            "where the fills were doing the work.\n\n"
+            "**Two red flags in that table.** Double Bottom shows an 88% maximum drawdown across 490 "
+            "trades — a barely-positive expectancy attached to a near-total loss of capital is not a "
+            "tradeable system, it's a warning. And Episodic Pivot's 3 trades are far too few to conclude "
+            "anything; its own criteria are intraday and it clusters around earnings, so treat that row "
+            "as \"unmeasured\", not \"bad\".\n\n"
+            "---\n\n"
+            "**Read these as a ranking, not as returns.** The universe is momentum-pre-filtered and made "
+            "of companies that still exist today, which flatters everything in the table. 400 symbols "
+            "over four years is also a modest sample — Breakout's 135 trades is enough to take seriously, "
+            "Episodic Pivot's 3 is not. Re-run the comparison on the Backtest tab against your own "
+            "universe before you change how you size anything."
+        )
 
 
 # --------------------------------------------------------------------------

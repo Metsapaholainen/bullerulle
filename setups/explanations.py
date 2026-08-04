@@ -86,8 +86,15 @@ PATTERN_EXPLANATIONS = {
         "than choppy. It also skips a stock already up three days in a row, since by then the move "
         "is underway and your stop sits too far below to be worth taking.\n\n"
         "Why it's here: Qullamaggie credits Bonde as one of his own sources, and this is "
-        "essentially the same idea on a much shorter timeframe. It's also the setup in this app "
-        "that fits a premarket stop-buy best, because the trigger is simply the signal day's high. "
-        "Expect smaller wins per trade than Breakout, and many more of them."
+        "essentially the same idea on a much shorter timeframe. The trigger is simply the signal "
+        "day's high, which suits a premarket stop-buy better than anything else in this app.\n\n"
+        "⚠️ **It has not tested well here.** On 400 cached symbols over 2022-2026 with stop-buy "
+        "entries it returned -0.23R expectancy at a 0.62 profit factor, against Breakout's +0.47R "
+        "and 2.15. Its trailing exits average only +0.75R -- the winners never get large enough to "
+        "pay for the losers -- and that held across faster trails and earlier partials, so it's the "
+        "entries rather than the exit rules. Two likely reasons: this universe skews mid/large-cap "
+        "while Bonde's method leans on smaller, more volatile names, and he treats the scan as a "
+        "shortlist to judge by eye rather than as a mechanical system. Treat it as a scan worth "
+        "tuning, not a system to trade as-is."
     ),
 }
