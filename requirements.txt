@@ -6,3 +6,6 @@ plotly>=5.24
 python-dotenv>=1.0
 PyYAML>=6.0
 pyarrow>=17.0
+
+# Dev/test only
+pytest>=8.0
