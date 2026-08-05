@@ -244,10 +244,24 @@ def resolve_entry_and_stop(
         return EntryPlan(False, "ADR stop distance is zero")
 
     if stop_mode == "low_of_signal_day":
+        # A setup can override which price the stop is measured against by
+        # emitting stop_reference_low/high on its signal bar -- e.g. spring.py
+        # fires its signal on the RECLAIM day, whose own low sits well above
+        # the true undercut low that's the actual structural stop level. Same
+        # defensive .get() pattern already used for adr_pct just above, so it
+        # falls back to the real bar low/high (today's behavior) whenever a
+        # setup doesn't supply one -- none of the original nine setups ever
+        # emit this column, so they are provably unaffected.
         if side == "long":
-            raw_stop_distance = entry_price - signal_bar["low"]
+            reference_low = signal_bar.get("stop_reference_low") if hasattr(signal_bar, "get") else None
+            if reference_low is None or not np.isfinite(reference_low):
+                reference_low = signal_bar["low"]
+            raw_stop_distance = entry_price - reference_low
         else:
-            raw_stop_distance = signal_bar["high"] - entry_price
+            reference_high = signal_bar.get("stop_reference_high") if hasattr(signal_bar, "get") else None
+            if reference_high is None or not np.isfinite(reference_high):
+                reference_high = signal_bar["high"]
+            raw_stop_distance = reference_high - entry_price
         if not np.isfinite(raw_stop_distance) or raw_stop_distance <= 0:
             stop_distance = adr_stop_distance
         elif raw_stop_distance > adr_stop_distance:
@@ -285,6 +299,7 @@ def run_backtest(
     signals: dict,
     side: str = "long",
     setup_name: str = None,
+    regime_multiplier: pd.Series = None,
 ) -> BacktestResult:
     """`signals`: {symbol: DataFrame} as produced by
     scanner.scan_signals_over_history -- must have a boolean `match` column
@@ -298,7 +313,15 @@ def run_backtest(
     low, ADR-capped) already matches it. The override exists only as an
     optional alternative to experiment with, not because the default is
     wrong. Every other setup, and EP with no override configured, behaves
-    exactly as before."""
+    exactly as before.
+
+    `regime_multiplier` (optional, see scanner.compute_regime_series):
+    {date -> size_multiplier}, computed ONCE from the benchmark, indexed by
+    calendar date, not by symbol. A trailing optional kwarg so every
+    existing call site (which never passes it) behaves exactly as before.
+    A date missing from the Series is treated as 1.0 (no adjustment) --
+    consistent with the rest of this engine's convention of never letting a
+    missing optional signal kill a trade that would otherwise be taken."""
     effective_stop_mode = (
         bt.ep_stop_mode_override if (setup_name == "episodic_pivot" and bt.ep_stop_mode_override) else bt.stop_mode
     )
@@ -455,6 +478,15 @@ def run_backtest(
                 if avg_vol_at_signal is not None and np.isfinite(avg_vol_at_signal) and avg_vol_at_signal > 0:
                     max_shares_by_liquidity = avg_vol_at_signal * (bt.max_position_pct_of_avg_volume / 100.0)
                     shares = min(shares, max_shares_by_liquidity)
+            # Regime/crowding filter (see scanner.compute_regime_series):
+            # applied last, after every other sizing cap, so it scales down
+            # (or gates, at mult=0.0) whatever position the rest of the
+            # sizing logic already decided on -- not a replacement for it.
+            if regime_multiplier is not None and (side == "long" or bt.regime_apply_to_short):
+                mult = regime_multiplier.get(date, 1.0)
+                if mult is None or not np.isfinite(mult):
+                    mult = 1.0
+                shares *= mult
             if shares <= 0:
                 continue
 

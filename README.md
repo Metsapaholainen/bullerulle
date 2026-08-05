@@ -2,10 +2,22 @@
 
 A local scanner + backtester for Kristjan Kullamägi ("Qullamaggie")-style momentum
 swing setups: **Breakout**, **Episodic Pivot**, and **Parabolic Short**, plus five
-O'Neil chart patterns and Stockbee's **Momentum Burst**. All thresholds are
-adjustable, presets are saveable/comparable, and there's a reverse parameter
-finder that reverse-engineers what settings would have captured a specific
-stock's past move.
+O'Neil chart patterns, Stockbee's **Momentum Burst**, Minervini's **VCP**, and a
+Wyckoff-style **Spring**. All thresholds are adjustable, presets are
+saveable/comparable, and there's a reverse parameter finder that
+reverse-engineers what settings would have captured a specific stock's past move.
+
+**Anti-crowd features (opt-in, off by default), for when the plain Breakout scan
+is crowded enough to be gameable:** VCP and Spring detect structurally different,
+less-common setups (a genuine multi-leg contraction, and a shakeout-before-breakout
+that fires before price even breaks its base). A recent-fakeout filter and a
+close-confirmation requirement on Breakout/VCP target the fact that a bare
+resistance level is an easy, gameable trigger. A regime/crowding filter can
+downsize or gate new entries during a market drawdown or high-volatility stretch,
+per the momentum-crash literature (Daniel & Moskowitz, NBER w20439/JFE 2016). See
+each setup's own explanation in the app (or `setups/explanations.py`) for the
+actual measured numbers -- treat all of this as promising, not proven; only
+Spring so far has a real trade sample (229 trades on the full cached universe).
 
 Data comes from the [Financial Modeling Prep](https://financialmodelingprep.com/) API.
 

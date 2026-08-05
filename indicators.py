@@ -109,6 +109,31 @@ def add_efficiency_ratio(df: pd.DataFrame, window: int, col_name: str = None) ->
     return df
 
 
+def add_level_fakeout_count(
+    df: pd.DataFrame, resistance: pd.Series, lookback_days: int,
+    touch_tolerance_pct: float, min_reversal_pct: float,
+) -> pd.Series:
+    """Count of trailing days (excluding today) where price touched TODAY's
+    resistance level but reversed and closed back below it -- a mechanical
+    proxy for the order-clustering-driven stall documented in FX
+    market-microstructure research (Osler, JFE 2003 and related FRBNY
+    papers): stop-loss orders cluster just BEYOND round numbers/prior highs
+    (a genuine break tends to accelerate), while take-profit orders cluster
+    AT them (causing stalls/reversals right at the level). This is NOT a
+    claim about intent -- "smart money hunting stops" is unevidenced
+    folklore and is deliberately not how this is framed or used.
+
+    `resistance` is whatever level the calling setup already computed
+    (e.g. breakout.py's `base_high`, itself `.shift(1)`-based) -- comparing
+    historical highs against TODAY's resistance value is comparing against
+    the same physical price level that existed before today's candle, not
+    a moving target."""
+    touched = df["high"] >= resistance * (1 - touch_tolerance_pct / 100.0)
+    rejected = df["close"] <= resistance * (1 - min_reversal_pct / 100.0)
+    fakeout_day = (touched & rejected).shift(1).fillna(False)
+    return fakeout_day.rolling(lookback_days, min_periods=1).sum()
+
+
 def rs_line_at_high(close: pd.Series, benchmark_close: pd.Series, window: int = 63) -> pd.Series:
     """Bool series: is the stock/benchmark ratio at a `window`-day high?
 

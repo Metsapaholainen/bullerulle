@@ -21,7 +21,14 @@ from backtest.stats import compute_stats, stats_summary_text
 from data.cache import get_history_bulk
 from data.fmp_client import FMPClient, FMPError
 from notifications import send_sell_alerts
-from scanner import load_scan_universe_history, run_scan, scan_signals_over_history
+from scanner import (
+    DEFAULT_BENCHMARK_SYMBOL,
+    compute_regime_series,
+    ensure_benchmark_loaded,
+    load_scan_universe_history,
+    run_scan,
+    scan_signals_over_history,
+)
 from sell_alerts import check_watchlist, load_watchlist
 from setups import SETUP_REGISTRY
 
@@ -83,8 +90,17 @@ def cmd_backtest(args):
     }
     history = {sym: df for sym, df in history.items() if not df.empty}
 
+    regime_multiplier = None
+    if settings.backtest.regime_filter_enabled:
+        benchmark_df = ensure_benchmark_loaded(history, client, args.start, args.end)
+        regime = compute_regime_series(benchmark_df, settings.backtest)
+        if not regime.empty:
+            regime_multiplier = regime["size_multiplier"]
+
     signals = scan_signals_over_history(settings, history, args.setup)
-    result = run_backtest(settings.backtest, signals, side=SETUP_REGISTRY[args.setup]["side"])
+    result = run_backtest(
+        settings.backtest, signals, side=SETUP_REGISTRY[args.setup]["side"], regime_multiplier=regime_multiplier
+    )
     stats = compute_stats(result)
     print(stats_summary_text(stats))
 

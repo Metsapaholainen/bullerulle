@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from indicators import add_adr_pct, add_volume_stats
+from indicators import add_adr_pct, add_level_fakeout_count, add_volume_stats
 from settings import BreakoutSettings
 
 
@@ -114,12 +114,32 @@ def scan(df: pd.DataFrame, settings: BreakoutSettings, rs_rating: pd.Series = No
     if settings.require_net_prior_advance:
         shape_cond &= prior_net_move_pct >= settings.min_prior_net_advance_pct
 
+    recent_fakeout_count = pd.Series(0, index=df.index)
+    if settings.fakeout_filter_action != "off":
+        recent_fakeout_count = add_level_fakeout_count(
+            df, resistance, settings.fakeout_lookback_days,
+            settings.fakeout_touch_tolerance_pct, settings.fakeout_min_reversal_pct,
+        )
+        if settings.fakeout_filter_action == "exclude":
+            shape_cond = shape_cond & (recent_fakeout_count == 0)
+
     # Trigger conditions -- the actual breakout: crossing resistance on volume.
-    cond = shape_cond & (df["close"] > resistance) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
+    raw_cond = shape_cond & (df["close"] > resistance) & (df[vol_ratio_col] >= settings.breakout_volume_ratio_min)
+
+    # Always computed as a diagnostic (inspectable in every scan), regardless
+    # of require_close_confirmation: does the breakout still hold a FULL DAY
+    # LATER, checked against YESTERDAY's already-known resistance level? Zero
+    # look-ahead -- this just moves "the signal" one day later and asks
+    # whether it's still standing, which is exactly what the Osler evidence
+    # says distinguishes a genuine break (accelerates, holds) from a stall.
+    confirmed_breakout = raw_cond.shift(1).fillna(False) & (df["close"] > resistance.shift(1))
+    cond = confirmed_breakout if settings.require_close_confirmation else raw_cond
 
     out = pd.DataFrame(index=df.index)
     out["match"] = cond.fillna(False)
     out["shape_match"] = shape_cond.fillna(False)
+    out["confirmed_breakout"] = confirmed_breakout.fillna(False)
+    out["recent_fakeout_count"] = recent_fakeout_count
     out["adr_pct"] = df[adr_col]
     out["prior_move_pct"] = prior_move_pct
     out["base_range_pct"] = base_range_pct
@@ -131,10 +151,13 @@ def scan(df: pd.DataFrame, settings: BreakoutSettings, rs_rating: pd.Series = No
     out["ema_fast_slope_pct"] = ema_fast_slope_pct
     out["ema_slow_slope_pct"] = ema_slow_slope_pct
     out["first_half_low"] = first_half_low
-    out["score"] = (
+    score = (
         (df[adr_col].clip(lower=0) / max(settings.min_adr_pct, 1e-9))
         + (rs.clip(lower=0) / 100.0) * 2.0
         + df[vol_ratio_col].clip(lower=0)
         + (prior_move_pct.clip(lower=0) / 100.0)
     )
+    if settings.fakeout_filter_action == "penalize":
+        score = score - recent_fakeout_count * settings.fakeout_penalty_score
+    out["score"] = score
     return out

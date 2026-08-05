@@ -52,6 +52,8 @@ def history_lookback_days(settings: Settings) -> int:
         settings.flat_base.base_days + settings.flat_base.prior_move_lookback_days + 30,
         settings.ascending_base.pattern_lookback_days + 30,
         settings.high_tight_flag.flag_lookback_days + settings.high_tight_flag.run_up_lookback_days + 30,
+        settings.vcp.vcp_lookback_days + settings.vcp.prior_move_lookback_days + 30,
+        settings.spring.range_lookback_days + 30,
         max(settings.rs_rating.lookback_periods) + 30,
         max(settings.universe.momentum_timeframes_days, default=0) + 30,
         300,  # floor so sma_200 etc. have room even with small windows configured
@@ -308,6 +310,71 @@ def market_direction(benchmark_df: pd.DataFrame) -> dict:
     }
 
 
+def compute_regime_series(benchmark_df: pd.DataFrame, bt: "BacktestSettings") -> pd.DataFrame:
+    """Momentum-crash / crowding-aware position sizing, computed ONCE from
+    the benchmark's (default SPY) own OHLCV -- never per-symbol, so this
+    stays a single cheap pass regardless of universe size and doesn't create
+    a circular import between scanner.py and backtest/engine.py (which only
+    imports settings.BacktestSettings).
+
+    Real evidence behind this (Daniel & Moskowitz, "Momentum Crashes," NBER
+    w20439/JFE 2016): momentum strategies are measurably more crash-prone
+    after a broad-market drawdown and during high-volatility regimes. This
+    is NOT a measure of crowding itself (no 13F/order-flow data available
+    here) -- it's a regime filter using only what's actually measurable from
+    daily OHLCV.
+
+    `drawdown_pct`: the benchmark's close vs. its own trailing
+    `regime_drawdown_lookback_days` high. `vol_percentile`: the benchmark's
+    own ADR% (`regime_vol_lookback_days`), percentile-ranked against its
+    trailing `regime_vol_percentile_window_days` of history -- a stand-in
+    for a volatility index, since no VIX-equivalent endpoint exists in this
+    app's data source. `crowded` combines both flags via
+    `regime_combine_mode` ("any"|"all"). `size_multiplier` is 1.0 normally,
+    else `regime_size_multiplier` (mode="downsize") or 0.0 (mode="gate")
+    when crowded.
+
+    Returns a DataFrame indexed like `benchmark_df`, or empty if there isn't
+    enough history yet -- callers should treat a missing date as
+    size_multiplier=1.0 (no filtering), not an error."""
+    if benchmark_df is None or benchmark_df.empty or len(benchmark_df) < bt.regime_vol_lookback_days + 1:
+        return pd.DataFrame()
+
+    close = benchmark_df["close"]
+    high = benchmark_df["high"]
+    low = benchmark_df["low"]
+
+    rolling_high = close.rolling(bt.regime_drawdown_lookback_days, min_periods=1).max()
+    drawdown_pct = (close - rolling_high) / rolling_high * 100.0
+    high_drawdown = drawdown_pct <= bt.regime_max_drawdown_pct
+
+    daily_range_pct = (high / low - 1.0) * 100.0
+    adr_pct = daily_range_pct.rolling(bt.regime_vol_lookback_days).mean()
+    vol_percentile = adr_pct.rolling(
+        bt.regime_vol_percentile_window_days, min_periods=max(20, bt.regime_vol_percentile_window_days // 4)
+    ).rank(pct=True) * 100.0
+    high_vol = vol_percentile >= bt.regime_vol_percentile_threshold
+
+    if bt.regime_combine_mode == "all":
+        crowded = high_drawdown.fillna(False) & high_vol.fillna(False)
+    else:
+        crowded = high_drawdown.fillna(False) | high_vol.fillna(False)
+
+    if bt.regime_action == "gate":
+        size_multiplier = pd.Series(1.0, index=benchmark_df.index)
+        size_multiplier[crowded] = 0.0
+    else:
+        size_multiplier = pd.Series(1.0, index=benchmark_df.index)
+        size_multiplier[crowded] = bt.regime_size_multiplier
+
+    out = pd.DataFrame(index=benchmark_df.index)
+    out["drawdown_pct"] = drawdown_pct
+    out["vol_percentile"] = vol_percentile
+    out["crowded"] = crowded
+    out["size_multiplier"] = size_multiplier
+    return out
+
+
 # Auto-detect: instead of requiring one exact window-length per pattern
 # (e.g. "the cup is exactly 130 days"), sweep a handful of realistic sizes
 # spanning what O'Neil's book actually documents, and count it a match if
@@ -340,6 +407,10 @@ PATTERN_SIZE_VARIANTS = {
     # Bonde's own range is "5 to 10 days of orderly consolidation"; the wider
     # sizes cover a stock that based for a few weeks before the burst.
     "momentum_burst": [{"consolidation_days": d} for d in (5, 8, 10, 15, 20)],
+    "vcp": [
+        {"vcp_lookback_days": d, "pivot_days": max(3, d // 15)} for d in (50, 70, 90, 120, 150)
+    ],
+    "spring": [{"range_lookback_days": d} for d in (20, 30, 40, 55, 70)],
 }
 
 # Which settings field holds "how long is this pattern's base" for each setup.
@@ -356,6 +427,8 @@ QUALITY_BASE_DAYS_FIELD = {
     "ascending_base": "pattern_lookback_days",
     "high_tight_flag": "flag_lookback_days",
     "momentum_burst": "consolidation_days",
+    "vcp": "vcp_lookback_days",
+    "spring": "range_lookback_days",
 }
 
 # The SHORT/recent window each setup actually measures tightness and volume
@@ -375,6 +448,7 @@ QUALITY_BASE_DAYS_FIELD = {
 # tier). Not a mis-weighted component; a dead one.
 QUALITY_TIGHTNESS_WINDOW_FIELD = {
     "breakout": "min_consolidation_days",
+    "vcp": "pivot_days",
 }
 
 
@@ -628,6 +702,8 @@ APPROACHING_PIVOT_SETUPS = {
     "cup_with_handle": "pivot",
     "double_bottom": "middle_peak",
     "flat_base": "base_high",
+    "vcp": "resistance",
+    "spring": "range_low",
     "ascending_base": "resistance",
     "high_tight_flag": "resistance",
     "momentum_burst": "resistance",
@@ -776,6 +852,7 @@ def scan_signals_over_history(
     history: dict,
     setup_name: str,
     min_stars: int = 0,
+    require_confirmed_breakout: bool = False,
 ) -> dict:
     """For backtesting: run one setup across *every* historical bar (not
     just the latest) for every symbol. Returns {symbol: DataFrame} where
@@ -786,7 +863,15 @@ def scan_signals_over_history(
     "only 4-star-and-better setups" and see whether the score actually
     separates winners from losers rather than assuming it does. The score is
     computed per bar from data available at that bar, so this stays causally
-    valid inside a historical simulation."""
+    valid inside a historical simulation.
+
+    `require_confirmed_breakout` A/B-tests the close-confirmation delay
+    (see `confirmed_breakout` in breakout.py/vcp.py) WITHOUT mutating live
+    settings and re-running the whole Designer flow -- same precedent as
+    `min_stars` above. A pure intersection with the setup's own `match`, so
+    it's safe against setups with no `confirmed_breakout` column (silently
+    skipped, matching min_stars' own "scoring is a filter, never a reason
+    to lose the signals" convention)."""
     if setup_name not in SETUP_REGISTRY:
         raise ValueError(f"Unknown setup: {setup_name}")
     spec = SETUP_REGISTRY[setup_name]
@@ -814,6 +899,8 @@ def scan_signals_over_history(
         result = spec["module"].scan(enriched, setup_settings, rs_rating=rs_series).join(
             enriched[["open", "high", "low", "close", "volume"]]
         )
+        if require_confirmed_breakout and "confirmed_breakout" in result.columns:
+            result["match"] = result["match"] & result["confirmed_breakout"].fillna(False)
         if min_stars > 0:
             try:
                 quality = compute_quality_panel(

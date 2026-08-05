@@ -47,6 +47,12 @@ breakout:
   higher_lows_tolerance_pct: 0.0
   require_net_prior_advance: false
   min_prior_net_advance_pct: 0.0
+  fakeout_filter_action: "off"
+  fakeout_lookback_days: 60
+  fakeout_touch_tolerance_pct: 1.5
+  fakeout_min_reversal_pct: 1.0
+  fakeout_penalty_score: 1.0
+  require_close_confirmation: false
 
 episodic_pivot:
   enabled: true
@@ -145,6 +151,44 @@ momentum_burst:
   min_adr_pct: 2.5
   min_rs_rating: 50
   adr_lookback_days: 20
+
+vcp:
+  enabled: true
+  vcp_lookback_days: 90
+  swing_order_days: 3
+  min_legs: 2
+  max_legs_checked: 4
+  contraction_tolerance_pct: 15.0    # up from 10.0, looser tolerance to match this preset's theme
+  volume_tolerance_pct: 20.0         # up from 15.0
+  pivot_days: 5
+  max_pivot_range_pct: 10.0          # up from 8.0
+  max_pivot_volume_dryup_ratio: 0.8  # up from 0.7
+  prior_move_lookback_days: 63
+  prior_move_min_pct: 15.0           # down from 20.0
+  min_rs_rating: 55                  # down from 70
+  min_adr_pct: 2.5                   # down from 3.0
+  adr_lookback_days: 20
+  breakout_volume_ratio_min: 1.3     # down from 1.5
+  volume_avg_period: 50
+  fakeout_filter_action: "off"
+  fakeout_lookback_days: 60
+  fakeout_touch_tolerance_pct: 1.5
+  fakeout_min_reversal_pct: 1.0
+  fakeout_penalty_score: 1.0
+
+spring:
+  enabled: true
+  range_lookback_days: 40
+  max_range_pct: 35.0                # up from 30.0
+  volume_dryup_ratio_max: 0.95       # up from 0.85
+  penetration_min_pct: 0.5
+  penetration_max_pct: 10.0          # up from 8.0
+  reclaim_max_days: 3
+  max_reclaim_volume_ratio: 1.5      # up from 1.3
+  min_adr_pct: 2.0                   # down from 2.5
+  adr_lookback_days: 20
+  min_rs_rating: 0
+  volume_avg_period: 50
 
 backtest:
   initial_capital: 100000

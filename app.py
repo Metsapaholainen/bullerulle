@@ -26,6 +26,7 @@ from scanner import (
     DEFAULT_BENCHMARK_SYMBOL,
     SECONDARY_BENCHMARK_SYMBOL,
     TIMEFRAME_LABELS,
+    compute_regime_series,
     ensure_benchmark_loaded,
     find_approaching_pivot,
     history_lookback_days,
@@ -533,6 +534,24 @@ def _render_market_banner(symbol: str, md: dict) -> None:
     )
 
 
+def get_regime_multiplier(settings: Settings, history: dict):
+    """Shared by every run_backtest() call site below: None when the filter
+    is off or the benchmark isn't loaded (run_backtest treats None exactly
+    like "no filter", so every call site stays correct with no extra
+    branching), otherwise the {date -> size_multiplier} Series from
+    scanner.compute_regime_series -- computed fresh each call since it's
+    settings-dependent (regime_action/thresholds can change interactively
+    in the Designer tab) and cheap (one pass over the benchmark's own
+    history, not per-symbol)."""
+    if not settings.backtest.regime_filter_enabled:
+        return None
+    benchmark_df = history.get(DEFAULT_BENCHMARK_SYMBOL)
+    if benchmark_df is None or benchmark_df.empty:
+        return None
+    regime = compute_regime_series(benchmark_df, settings.backtest)
+    return regime["size_multiplier"] if not regime.empty else None
+
+
 md = st.session_state.get("market_direction")
 md_secondary = st.session_state.get("market_direction_secondary")
 if md or md_secondary:
@@ -663,10 +682,12 @@ PATTERN_WINDOW_FIELDS = {
         ("flag_lookback_days", "Flag", "rgba(255,165,0,0.30)"),
     ],
     "momentum_burst": [("consolidation_days", "Quiet base", "rgba(100,149,237,0.18)")],
+    "vcp": [("vcp_lookback_days", "VCP base", "rgba(100,149,237,0.15)")],
+    "spring": [("range_lookback_days", "Range", "rgba(100,149,237,0.15)")],
 }
 # Whichever of these diagnostic columns is present holds the pattern's key
 # breakout/resistance level, drawn as a horizontal reference line.
-RESISTANCE_FIELDS = ["resistance", "pivot", "base_high", "middle_peak"]
+RESISTANCE_FIELDS = ["resistance", "pivot", "base_high", "middle_peak", "range_low"]
 
 
 def compute_adr_pct_at(df: pd.DataFrame, date, lookback: int = 20):
@@ -1045,6 +1066,28 @@ with tab_designer:
             st.markdown("**\"A big move higher\" (not just a wide/choppy range)**")
             s.require_net_prior_advance = st.checkbox("Require genuine net advance", value=s.require_net_prior_advance, key=f"d_bo_netadv_{st.session_state.settings_version}")
             s.min_prior_net_advance_pct = st.slider("Min prior net advance %", 0.0, 100.0, float(s.min_prior_net_advance_pct), 5.0, key=f"d_bo_netadvmin_{st.session_state.settings_version}")
+            st.markdown("**Anti-crowd: fakeout filter & close confirmation** (opt-in, unproven against real trades yet)")
+            s.fakeout_filter_action = st.selectbox(
+                "Recent-fakeout action", ["off", "penalize", "exclude"],
+                index=["off", "penalize", "exclude"].index(s.fakeout_filter_action),
+                key=f"d_bo_fakeoutaction_{st.session_state.settings_version}",
+                help="Mechanical proxy for the Osler order-clustering evidence: counts trailing days where price "
+                "touched this resistance level but reversed and closed back below it. 'penalize' docks the score, "
+                "'exclude' requires zero recent fakeouts to match.",
+            )
+            if s.fakeout_filter_action != "off":
+                s.fakeout_lookback_days = st.slider("Fakeout lookback (days)", 10, 120, int(s.fakeout_lookback_days), key=f"d_bo_fakeoutlb_{st.session_state.settings_version}")
+                s.fakeout_touch_tolerance_pct = st.slider("Touch tolerance %", 0.1, 5.0, float(s.fakeout_touch_tolerance_pct), 0.1, key=f"d_bo_fakeouttouch_{st.session_state.settings_version}")
+                s.fakeout_min_reversal_pct = st.slider("Min reversal below level %", 0.1, 5.0, float(s.fakeout_min_reversal_pct), 0.1, key=f"d_bo_fakeoutrev_{st.session_state.settings_version}")
+                if s.fakeout_filter_action == "penalize":
+                    s.fakeout_penalty_score = st.slider("Penalty per fakeout", 0.1, 5.0, float(s.fakeout_penalty_score), 0.1, key=f"d_bo_fakeoutpen_{st.session_state.settings_version}")
+            s.require_close_confirmation = st.checkbox(
+                "Require close confirmation (a full extra day of delay)", value=s.require_close_confirmation,
+                key=f"d_bo_confirm_{st.session_state.settings_version}",
+                help="Only trigger if the breakout still holds a full day later, checked against yesterday's "
+                "already-known resistance. Real evidence a genuine break accelerates/holds -- but adds a day of "
+                "lag, directly opposed to 'get in before the crowd'.",
+            )
         elif setup_choice == "episodic_pivot":
             s.min_gap_pct = st.slider("Min gap %", 1.0, 50.0, float(s.min_gap_pct), 1.0, key=f"d_ep_gap_{st.session_state.settings_version}")
             s.min_volume_ratio = st.slider("Min volume ratio", 0.5, 10.0, float(s.min_volume_ratio), 0.1, key=f"d_ep_vol_{st.session_state.settings_version}")
@@ -1128,6 +1171,43 @@ with tab_designer:
             s.max_consecutive_up_days = st.slider("Skip after this many consecutive up days", 1, 8, int(s.max_consecutive_up_days), 1, key=f"d_mb_consec_{st.session_state.settings_version}", help="'Avoid day 2/3 entries' -- by then the burst is underway and your stop sits too far below to be worth taking.")
             s.min_adr_pct = st.slider("Min ADR %", 0.5, 12.0, float(s.min_adr_pct), 0.5, key=f"d_mb_adr_{st.session_state.settings_version}")
             s.min_rs_rating = st.slider("Min RS rating", 0, 99, int(s.min_rs_rating), 1, key=f"d_mb_rs_{st.session_state.settings_version}")
+        elif setup_choice == "vcp":
+            st.caption("Minervini VCP -- genuine multi-leg contraction, not just 'is the range tight right now'.")
+            s.vcp_lookback_days = st.slider("VCP lookback (days)", 30, 180, int(s.vcp_lookback_days), key=f"d_vcp_lb_{st.session_state.settings_version}")
+            s.swing_order_days = st.slider("Swing-point order (bars each side)", 1, 10, int(s.swing_order_days), key=f"d_vcp_swing_{st.session_state.settings_version}", help="Bigger = fewer, more significant swings; smaller = more swings, more noise-sensitive.")
+            s.min_legs = st.slider("Min contracting legs", 1, 4, int(s.min_legs), key=f"d_vcp_minlegs_{st.session_state.settings_version}")
+            s.contraction_tolerance_pct = st.slider("Contraction tolerance %", 0.0, 40.0, float(s.contraction_tolerance_pct), 1.0, key=f"d_vcp_ctol_{st.session_state.settings_version}", help="Slack allowed before the 'each leg shallower/quieter than the last' chain breaks -- real data is never perfectly monotonic.")
+            s.volume_tolerance_pct = st.slider("Volume-decline tolerance %", 0.0, 40.0, float(s.volume_tolerance_pct), 1.0, key=f"d_vcp_vtol_{st.session_state.settings_version}")
+            s.pivot_days = st.slider("Pivot window (days)", 2, 20, int(s.pivot_days), key=f"d_vcp_pivotdays_{st.session_state.settings_version}")
+            s.max_pivot_range_pct = st.slider("Max pivot range %", 2.0, 25.0, float(s.max_pivot_range_pct), 0.5, key=f"d_vcp_pivotrange_{st.session_state.settings_version}")
+            s.max_pivot_volume_dryup_ratio = st.slider("Max pivot volume dry-up ratio", 0.2, 1.5, float(s.max_pivot_volume_dryup_ratio), 0.05, key=f"d_vcp_dryup_{st.session_state.settings_version}")
+            s.prior_move_min_pct = st.slider("Prior move min %", 0.0, 100.0, float(s.prior_move_min_pct), 5.0, key=f"d_vcp_priormove_{st.session_state.settings_version}")
+            s.min_adr_pct = st.slider("Min ADR %", 0.5, 15.0, float(s.min_adr_pct), 0.5, key=f"d_vcp_adr_{st.session_state.settings_version}")
+            s.min_rs_rating = st.slider("Min RS rating", 1, 99, int(s.min_rs_rating), key=f"d_vcp_rs_{st.session_state.settings_version}")
+            s.breakout_volume_ratio_min = st.slider("Min breakout volume ratio", 0.5, 6.0, float(s.breakout_volume_ratio_min), 0.1, key=f"d_vcp_vol_{st.session_state.settings_version}")
+            st.markdown("**Anti-crowd: fakeout filter** (opt-in, unproven against real trades yet)")
+            s.fakeout_filter_action = st.selectbox(
+                "Recent-fakeout action", ["off", "penalize", "exclude"],
+                index=["off", "penalize", "exclude"].index(s.fakeout_filter_action),
+                key=f"d_vcp_fakeoutaction_{st.session_state.settings_version}",
+            )
+            if s.fakeout_filter_action != "off":
+                s.fakeout_lookback_days = st.slider("Fakeout lookback (days)", 10, 120, int(s.fakeout_lookback_days), key=f"d_vcp_fakeoutlb_{st.session_state.settings_version}")
+                s.fakeout_touch_tolerance_pct = st.slider("Touch tolerance %", 0.1, 5.0, float(s.fakeout_touch_tolerance_pct), 0.1, key=f"d_vcp_fakeouttouch_{st.session_state.settings_version}")
+                s.fakeout_min_reversal_pct = st.slider("Min reversal below level %", 0.1, 5.0, float(s.fakeout_min_reversal_pct), 0.1, key=f"d_vcp_fakeoutrev_{st.session_state.settings_version}")
+                if s.fakeout_filter_action == "penalize":
+                    s.fakeout_penalty_score = st.slider("Penalty per fakeout", 0.1, 5.0, float(s.fakeout_penalty_score), 0.1, key=f"d_vcp_fakeoutpen_{st.session_state.settings_version}")
+        elif setup_choice == "spring":
+            st.caption("Wyckoff Spring -- fires on the reclaim day, while price is still inside/near the range, before any breakout-level bot would see it.")
+            s.range_lookback_days = st.slider("Range lookback (days)", 15, 90, int(s.range_lookback_days), key=f"d_spr_range_{st.session_state.settings_version}")
+            s.max_range_pct = st.slider("Max range %", 5.0, 60.0, float(s.max_range_pct), 1.0, key=f"d_spr_maxrange_{st.session_state.settings_version}")
+            s.volume_dryup_ratio_max = st.slider("Max range volume dry-up ratio", 0.2, 1.5, float(s.volume_dryup_ratio_max), 0.05, key=f"d_spr_dryup_{st.session_state.settings_version}")
+            s.penetration_min_pct = st.slider("Min undercut penetration %", 0.0, 5.0, float(s.penetration_min_pct), 0.1, key=f"d_spr_penmin_{st.session_state.settings_version}", help="Too shallow and it's noise, not a real undercut.")
+            s.penetration_max_pct = st.slider("Max undercut penetration %", 2.0, 20.0, float(s.penetration_max_pct), 0.5, key=f"d_spr_penmax_{st.session_state.settings_version}", help="Too deep and it's a real breakdown, not a spring.")
+            s.reclaim_max_days = st.slider("Max days to reclaim", 1, 8, int(s.reclaim_max_days), key=f"d_spr_reclaimdays_{st.session_state.settings_version}")
+            s.max_reclaim_volume_ratio = st.slider("Max reclaim volume ratio (vs the range's own avg)", 0.3, 3.0, float(s.max_reclaim_volume_ratio), 0.1, key=f"d_spr_reclaimvol_{st.session_state.settings_version}", help="Volume should NOT expand on the reclaim -- contrast with a genuine breakdown, which does.")
+            s.min_adr_pct = st.slider("Min ADR %", 0.5, 12.0, float(s.min_adr_pct), 0.5, key=f"d_spr_adr_{st.session_state.settings_version}")
+            s.min_rs_rating = st.slider("Min RS rating", 0, 99, int(s.min_rs_rating), 1, key=f"d_spr_rs_{st.session_state.settings_version}", help="Deliberately 0 by default -- springs often PRECEDE a stock becoming a leader, not follow it.")
         else:
             # Reached only if a setup is registered without its own branch
             # above. Previously this was `else: # high_tight_flag`, which
@@ -1247,6 +1327,63 @@ with tab_designer:
             )
             bt.ep_stop_mode_override = None if ep_override_choice == "(use Stop placement above)" else ep_override_choice
 
+        st.markdown("**Anti-crowd: regime/crowding filter** (opt-in, off by default)")
+        bt.regime_filter_enabled = st.checkbox(
+            "Downsize or gate new entries during a stressed market regime", value=bool(bt.regime_filter_enabled),
+            key=f"d_bt_regime_on_{st.session_state.settings_version}",
+            help="Real evidence (Daniel & Moskowitz, 'Momentum Crashes', NBER w20439/JFE 2016): momentum "
+            "strategies are measurably more crash-prone after a broad-market drawdown and during high-vol "
+            "regimes. Computed once from SPY's own OHLCV, not per-symbol.",
+        )
+        if bt.regime_filter_enabled:
+            bt.regime_action = st.selectbox(
+                "Action when the market is 'crowded'", ["downsize", "gate"],
+                index=0 if bt.regime_action == "downsize" else 1,
+                format_func=lambda v: "Downsize new entries" if v == "downsize" else "Skip new entries entirely",
+                key=f"d_bt_regime_action_{st.session_state.settings_version}",
+            )
+            if bt.regime_action == "downsize":
+                bt.regime_size_multiplier = st.slider(
+                    "Size multiplier while crowded", 0.0, 1.0, float(bt.regime_size_multiplier), 0.05,
+                    key=f"d_bt_regime_mult_{st.session_state.settings_version}",
+                )
+            bt.regime_max_drawdown_pct = st.slider(
+                "Drawdown trigger (SPY vs its trailing high, %)", -50.0, -2.0, float(bt.regime_max_drawdown_pct), 1.0,
+                key=f"d_bt_regime_dd_{st.session_state.settings_version}",
+            )
+            bt.regime_drawdown_lookback_days = st.slider(
+                "Drawdown lookback (days)", 60, 504, int(bt.regime_drawdown_lookback_days), 10,
+                key=f"d_bt_regime_ddlb_{st.session_state.settings_version}",
+            )
+            bt.regime_vol_percentile_threshold = st.slider(
+                "High-vol trigger (SPY ADR%, percentile of its own trailing history)", 50.0, 99.0,
+                float(bt.regime_vol_percentile_threshold), 1.0, key=f"d_bt_regime_volpct_{st.session_state.settings_version}",
+                help="No VIX-equivalent endpoint exists here, so SPY's own ADR% -- percentile-ranked against "
+                "its trailing history -- stands in for 'how volatile is the market right now'.",
+            )
+            bt.regime_combine_mode = st.selectbox(
+                "Combine drawdown + high-vol as", ["any", "all"],
+                index=0 if bt.regime_combine_mode == "any" else 1,
+                format_func=lambda v: "Either flag triggers 'crowded'" if v == "any" else "Both flags must trigger together",
+                key=f"d_bt_regime_combine_{st.session_state.settings_version}",
+            )
+            bt.regime_apply_to_short = st.checkbox(
+                "Also apply to Parabolic Short", value=bool(bt.regime_apply_to_short),
+                key=f"d_bt_regime_short_{st.session_state.settings_version}",
+                help="The crash literature behind this filter is about long-only momentum -- off by default "
+                "since extending it to the short side isn't evidenced.",
+            )
+            if history.get(DEFAULT_BENCHMARK_SYMBOL) is None:
+                st.caption("Benchmark (SPY) not loaded yet -- reload data from the sidebar for this filter to take effect.")
+            st.caption(
+                "Measured on Breakout, 2,418-symbol cached universe: off (cagr -9.4%, max DD -63.5%, "
+                "sharpe -0.04) -> downsize@0.5x (cagr -8.7%, max DD -63.2%, sharpe -0.02) -> gate "
+                "(cagr -7.5%, max DD -61.8%, sharpe +0.02). Directionally consistent with the crash "
+                "literature, but the cached SPY history only spans ~14 months against a multi-year "
+                "trade history, so most trade dates fall outside the window this filter can actually "
+                "see -- promising, not a full-period result."
+            )
+
     with col_results:
         if not history:
             st.info("Load data from the sidebar first to see live matches and backtest stats.")
@@ -1273,7 +1410,8 @@ with tab_designer:
                 )
                 designer_signals = scan_signals_over_history(settings, history, setup_choice)
                 st.session_state.designer_bt_result = run_backtest(
-                    settings.backtest, designer_signals, side=spec["side"], setup_name=setup_choice
+                    settings.backtest, designer_signals, side=spec["side"], setup_name=setup_choice,
+                    regime_multiplier=get_regime_multiplier(settings, history),
                 )
                 st.session_state.designer_fingerprint = designer_fingerprint
             live_results = st.session_state.designer_live_results
@@ -2120,7 +2258,10 @@ with tab_backtest:
         )
         if st.button("Run backtest"):
             signals = scan_signals_over_history(settings, bt_history, bt_setup)
-            result = run_backtest(settings.backtest, signals, side=SETUP_REGISTRY[bt_setup]["side"], setup_name=bt_setup)
+            result = run_backtest(
+                settings.backtest, signals, side=SETUP_REGISTRY[bt_setup]["side"], setup_name=bt_setup,
+                regime_multiplier=get_regime_multiplier(settings, history),
+            )
             st.session_state.bt_result = result
 
         result = st.session_state.get("bt_result")
@@ -2202,10 +2343,14 @@ with tab_backtest:
             compare_rows = []
             compare_progress = st.progress(0.0, text="Backtesting each pattern...")
             enabled = [name for name, spec in SETUP_REGISTRY.items() if getattr(settings, spec["settings_attr"]).enabled]
+            compare_regime_multiplier = get_regime_multiplier(settings, history)
             for i, name in enumerate(enabled):
                 spec = SETUP_REGISTRY[name]
                 signals = scan_signals_over_history(settings, bt_history, name)
-                result = run_backtest(settings.backtest, signals, side=spec["side"], setup_name=name)
+                result = run_backtest(
+                    settings.backtest, signals, side=spec["side"], setup_name=name,
+                    regime_multiplier=compare_regime_multiplier,
+                )
                 stats = compute_stats(result)
                 compare_rows.append({"pattern": spec["label"], "side": spec["side"], **stats})
                 compare_progress.progress((i + 1) / len(enabled), text=f"{spec['label']} done")
@@ -2255,10 +2400,13 @@ with tab_backtest:
                         close_panel, settings.rs_rating.lookback_periods, settings.rs_rating.period_weights
                     )
                     legout_rs_panel = {sym: rs_df[sym] for sym in rs_df.columns}
+            legout_regime_multiplier = get_regime_multiplier(settings, history)
             for i, key in enumerate(legout_compare_selected):
                 spec = LEGOUT_SCANS[key]
                 legout_signals = scan_legout_signals_over_history(bt_history, key, rs_panel=legout_rs_panel)
-                legout_result = run_backtest(settings.backtest, legout_signals, side="long")
+                legout_result = run_backtest(
+                    settings.backtest, legout_signals, side="long", regime_multiplier=legout_regime_multiplier,
+                )
                 legout_stats = compute_stats(legout_result)
                 legout_compare_rows.append({"pattern": spec["label"], "side": "long", **legout_stats})
                 legout_compare_progress.progress(
@@ -3223,6 +3371,17 @@ with tab_orders:
         "Turns the latest scan into stop-buy tickets you can place before the open. Every number here comes "
         "from the same code the backtest uses to fill and stop a trade, so what you place is what was tested."
     )
+
+    if settings.backtest.regime_filter_enabled and history:
+        _regime_mult = get_regime_multiplier(settings, history)
+        if _regime_mult is not None and not _regime_mult.empty:
+            _today_mult = float(_regime_mult.iloc[-1])
+            if _today_mult >= 1.0:
+                st.caption(f"🟢 Regime filter: market not currently flagged as crowded (size multiplier {_today_mult:.2f}x).")
+            elif _today_mult <= 0.0:
+                st.warning("🔴 Regime filter: market currently flagged as crowded -- the backtest assumes new entries are skipped entirely today.")
+            else:
+                st.warning(f"🟡 Regime filter: market currently flagged as crowded -- the backtest assumes new entries are sized at {_today_mult:.2f}x today.")
 
     if not history:
         st.info("Load data from the sidebar first, then run a scan on the Scanner tab.")

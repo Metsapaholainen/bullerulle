@@ -220,6 +220,55 @@ def _momentum_burst_diagram():
     )
 
 
+def _vcp_diagram():
+    # Three successive pullback legs, each SHALLOWER than the last (a
+    # narrowing amplitude staircase around a common resistance), ending in a
+    # tight low-volume pivot and breakout -- the visual signature that
+    # distinguishes a genuine multi-leg VCP from a single tight-range snapshot.
+    y = _curve(
+        [
+            (0, 1.0), (0.15, 1.5),
+            (0.25, 1.2), (0.35, 1.48),      # leg 1: deep pullback
+            (0.45, 1.30), (0.55, 1.47),     # leg 2: shallower pullback
+            (0.63, 1.38), (0.70, 1.46),     # leg 3: shallowest pullback
+            (0.78, 1.44), (0.85, 1.50), (1.0, 1.75),
+        ],
+        ripple_regions=[(0.25, 0.35, 0.02), (0.45, 0.55, 0.012), (0.63, 0.70, 0.006)],
+    )
+    return _figure(
+        y,
+        [
+            (0.0, 0.15, "Prior move", "rgba(100,149,237,0.10)"),
+            (0.15, 0.78, "Contracting legs (each shallower, quieter)", "rgba(100,149,237,0.15)"),
+            (0.78, 0.85, "Pivot", "rgba(255,165,0,0.30)"),
+        ],
+        marker_x_frac=0.85, marker_label="Breakout entry",
+        pivot=(1.50, 0.15, 0.85),
+        entry_zone=(0.82, 0.90, "Entry zone", _BUY_ENTRY_STYLE),
+    )
+
+
+def _spring_diagram():
+    # A quiet range with volume drying up, a brief false breakdown BELOW
+    # range support, then a reclaim back into the range -- match fires on the
+    # reclaim day, deliberately before price has broken out of anything.
+    y = _curve(
+        [
+            (0, 1.3), (0.3, 1.32), (0.55, 1.28), (0.7, 1.31),
+            (0.78, 1.05), (0.83, 1.02),     # the undercut -- briefly below range support
+            (0.88, 1.30), (0.95, 1.34), (1.0, 1.36),
+        ],
+        ripple_regions=[(0.0, 0.7, 0.012)],
+    )
+    return _figure(
+        y,
+        [(0.0, 0.78, "Quiet range, volume drying up", "rgba(100,149,237,0.15)")],
+        marker_x_frac=0.88, marker_label="Reclaim entry", marker_color="lime",
+        pivot=(1.28, 0.0, 0.88),
+        entry_zone=(0.85, 0.91, "Entry zone (reclaim day)", _BUY_ENTRY_STYLE),
+    )
+
+
 PATTERN_DIAGRAMS = {
     "breakout": _breakout_diagram,
     "episodic_pivot": _episodic_pivot_diagram,
@@ -230,6 +279,8 @@ PATTERN_DIAGRAMS = {
     "ascending_base": _ascending_base_diagram,
     "high_tight_flag": _high_tight_flag_diagram,
     "momentum_burst": _momentum_burst_diagram,
+    "vcp": _vcp_diagram,
+    "spring": _spring_diagram,
 }
 
 

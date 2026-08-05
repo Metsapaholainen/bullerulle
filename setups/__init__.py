@@ -8,6 +8,8 @@ from setups import (
     ascending_base,
     high_tight_flag,
     momentum_burst,
+    vcp,
+    spring,
 )
 from setups.explanations import PATTERN_EXPLANATIONS
 
@@ -66,6 +68,18 @@ SETUP_REGISTRY = {
         "label": "Momentum Burst (Stockbee)",
         "module": momentum_burst,
         "settings_attr": "momentum_burst",
+        "side": "long",
+    },
+    "vcp": {
+        "label": "VCP (Minervini)",
+        "module": vcp,
+        "settings_attr": "vcp",
+        "side": "long",
+    },
+    "spring": {
+        "label": "Spring (Wyckoff)",
+        "module": spring,
+        "settings_attr": "spring",
         "side": "long",
     },
 }

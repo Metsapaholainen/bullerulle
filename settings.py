@@ -89,6 +89,27 @@ class BreakoutSettings:
     # Opt-in (default off) -- see note above.
     require_net_prior_advance: bool = False
     min_prior_net_advance_pct: float = 0.0
+    # Real, peer-reviewed FX order-book evidence (Osler, JFE 2003 and
+    # related FRBNY/microstructure papers): stop-loss orders cluster just
+    # BEYOND round numbers/prior highs (a genuine break tends to
+    # accelerate), while take-profit orders cluster AT them (causing
+    # stalls/reversals right at the level). This is a mechanical proxy for
+    # that -- NOT a claim about intent ("smart money hunting stops" is
+    # unevidenced folklore and is deliberately not how this is framed).
+    # Opt-in, off by default -- unproven against real trades here yet.
+    fakeout_filter_action: str = "off"          # "off" | "penalize" | "exclude"
+    fakeout_lookback_days: int = 60
+    fakeout_touch_tolerance_pct: float = 1.5
+    fakeout_min_reversal_pct: float = 1.0
+    fakeout_penalty_score: float = 1.0
+    # `confirmed_breakout` (always computed as a diagnostic) requires the
+    # breakout to still hold a full day later, checked against YESTERDAY's
+    # already-known resistance level -- zero look-ahead. Requiring `match`
+    # to use it adds a full extra day of delay before an order can even be
+    # placed, which cuts directly against "get in before the crowd" -- ship
+    # off by default and let the live backtest comparison settle whether
+    # it's worth the lag, rather than assuming either way.
+    require_close_confirmation: bool = False
 
 
 @dataclass
@@ -255,6 +276,82 @@ class MomentumBurstSettings:
 
 
 @dataclass
+class VCPSettings:
+    """Minervini's Volatility Contraction Pattern: 2+ successive pullbacks
+    within a base, each SHALLOWER than the last, with volume declining in
+    parallel, ending in a tight low-volume pivot. Structurally more than
+    Breakout's single "is the range tight right now" snapshot -- this
+    requires a genuine multi-leg contraction SEQUENCE, which most simple
+    momentum-breakout bots don't implement, so it selects a smaller, less
+    crowded subset of names. See setups/vcp.py for the honesty note on what
+    is/isn't verified about this pattern."""
+    enabled: bool = True
+    vcp_lookback_days: int = 90
+    # How many bars on each side of a candidate swing point must be lower
+    # (for a high) or higher (for a low) to confirm it as a genuine local
+    # extreme -- bigger = fewer, more significant swings; smaller = more
+    # swings, more noise-sensitive.
+    swing_order_days: int = 3
+    min_legs: int = 2
+    max_legs_checked: int = 4
+    # How far a later (more recent) leg's depth/volume is allowed to exceed
+    # the earlier leg's before the "shallower/quieter each time" chain
+    # breaks -- real data is never perfectly monotonic.
+    contraction_tolerance_pct: float = 10.0
+    volume_tolerance_pct: float = 15.0
+    pivot_days: int = 5
+    max_pivot_range_pct: float = 8.0
+    max_pivot_volume_dryup_ratio: float = 0.7
+    prior_move_lookback_days: int = 63
+    prior_move_min_pct: float = 20.0
+    min_rs_rating: float = 70.0
+    min_adr_pct: float = 3.0
+    adr_lookback_days: int = 20
+    breakout_volume_ratio_min: float = 1.5
+    volume_avg_period: int = 50
+    # See BreakoutSettings' matching fields for the rationale (Osler et al.
+    # order-clustering evidence) -- VCP computes its own `resistance` level
+    # too, so it can reuse the same mechanical fakeout proxy.
+    fakeout_filter_action: str = "off"
+    fakeout_lookback_days: int = 60
+    fakeout_touch_tolerance_pct: float = 1.5
+    fakeout_min_reversal_pct: float = 1.0
+    fakeout_penalty_score: float = 1.0
+
+
+@dataclass
+class SpringSettings:
+    """Wyckoff-style Phase B/C "Spring": inside a quiet trading range with
+    volume drying up, a brief false breakdown below support that reclaims
+    the range within a few bars -- ideally WITHOUT a volume expansion
+    (contrast with a genuine breakdown, which does expand). `match` fires
+    on the reclaim day, while price is still inside/near the range -- this
+    is deliberately EARLIER than any resistance-breakout bot would ever see
+    the stock. Classical/coherent (Wyckoff, Pruden), not modern
+    peer-reviewed; described here mechanically (a structural
+    false-breakdown-and-reclaim), never as "smart money" intent."""
+    enabled: bool = True
+    range_lookback_days: int = 40
+    max_range_pct: float = 30.0
+    volume_dryup_ratio_max: float = 0.85
+    # How far below range support counts as a genuine "spring" undercut
+    # (not just noise) vs. how far is really a breakdown, not a spring.
+    penetration_min_pct: float = 0.5
+    penetration_max_pct: float = 8.0
+    reclaim_max_days: int = 3
+    max_reclaim_volume_ratio: float = 1.3
+    min_adr_pct: float = 2.5
+    adr_lookback_days: int = 20
+    # Deliberately 0 (off): springs often PRECEDE a stock becoming a
+    # leader, they don't follow it -- gating on RS here would filter out
+    # exactly the early names this setup exists to catch. This means Spring
+    # won't rank well in the shared cross-setup RS sort; may want its own
+    # dedicated view rather than relying on run_scan()'s shared ranking.
+    min_rs_rating: float = 0.0
+    volume_avg_period: int = 50
+
+
+@dataclass
 class BacktestSettings:
     initial_capital: float = 100_000
     risk_pct_per_trade: float = 1.0
@@ -350,6 +447,26 @@ class BacktestSettings:
     # optional alternative to experiment with in backtests, not because the
     # default is wrong; set to e.g. "adr_multiple" to try it.
     ep_stop_mode_override: Optional[str] = None
+    # Momentum crash / factor-crowding literature (Daniel & Moskowitz,
+    # "Momentum Crashes," NBER w20439/JFE 2016) finds momentum strategies are
+    # measurably more crash-prone after a broad-market drawdown and during
+    # high-volatility regimes. Computed ONCE from the benchmark's (SPY) own
+    # OHLCV -- never per-symbol -- via scanner.compute_regime_series().
+    # Long-only evidence: deliberately not applied to parabolic_short by
+    # default (regime_apply_to_short).
+    regime_filter_enabled: bool = False
+    regime_drawdown_lookback_days: int = 252
+    regime_max_drawdown_pct: float = -15.0
+    # No VIX/volatility-index endpoint exists in this app's data source, so
+    # the benchmark's own ADR% (percentile-ranked against its trailing
+    # history) stands in for "how volatile is the market right now."
+    regime_vol_lookback_days: int = 20
+    regime_vol_percentile_window_days: int = 504
+    regime_vol_percentile_threshold: float = 85.0
+    regime_combine_mode: str = "any"          # "any" | "all" -- how drawdown and vol flags combine into "crowded"
+    regime_action: str = "downsize"           # "downsize" | "gate"
+    regime_size_multiplier: float = 0.5
+    regime_apply_to_short: bool = False
 
 
 @dataclass
@@ -365,6 +482,8 @@ class Settings:
     ascending_base: AscendingBaseSettings = field(default_factory=AscendingBaseSettings)
     high_tight_flag: HighTightFlagSettings = field(default_factory=HighTightFlagSettings)
     momentum_burst: MomentumBurstSettings = field(default_factory=MomentumBurstSettings)
+    vcp: VCPSettings = field(default_factory=VCPSettings)
+    spring: SpringSettings = field(default_factory=SpringSettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
 
     def to_dict(self) -> dict:
@@ -387,6 +506,8 @@ class Settings:
             ascending_base=AscendingBaseSettings(**d.get("ascending_base", {})),
             high_tight_flag=HighTightFlagSettings(**d.get("high_tight_flag", {})),
             momentum_burst=MomentumBurstSettings(**d.get("momentum_burst", {})),
+            vcp=VCPSettings(**d.get("vcp", {})),
+            spring=SpringSettings(**d.get("spring", {})),
             backtest=BacktestSettings(**d.get("backtest", {})),
         )
 
