@@ -31,6 +31,16 @@ trades:
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
   notes: ''
+  entry_date: '2026-08-03'
+  entry_price: 55.332902624999996
+  partial_date: null
+  partial_price: null
+  exit_date: '2026-08-05'
+  exit_price: 54.93
+  exit_reason: stop
+  r_multiple: -1.0
+  pnl: -14.56285883755392
+  status: Loss
 - symbol: AGEN
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
