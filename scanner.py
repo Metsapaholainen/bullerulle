@@ -358,30 +358,66 @@ QUALITY_BASE_DAYS_FIELD = {
     "momentum_burst": "consolidation_days",
 }
 
+# The SHORT/recent window each setup actually measures tightness and volume
+# dry-up over -- as opposed to QUALITY_BASE_DAYS_FIELD above, which is "the
+# whole base" (used for the prior-move boundary and linearity). Only setups
+# whose own detector distinguishes a full base from a tighter recent tail
+# need an entry here; everything else falls back to its base-days field,
+# because that field already IS the short window (e.g. flat_base's base_days
+# has no larger enclosing base to be measured against).
+#
+# Concretely why this matters for breakout: its own shape_cond checks
+# tightness over min_consolidation_days (~16 days), not max_consolidation_days
+# (~40 days, QUALITY_BASE_DAYS_FIELD's entry). Scoring tightness over the
+# full 40-day window instead measured something the detector never claimed --
+# verified on 135 real Breakout trades, where it came out exactly 0.0 for
+# every single one (mean full-window range 47%, nowhere near any tightness
+# tier). Not a mis-weighted component; a dead one.
+QUALITY_TIGHTNESS_WINDOW_FIELD = {
+    "breakout": "min_consolidation_days",
+}
 
-def _quality_row(cache: dict, enriched, eval_date, rs_series, benchmark_close, base_days: int) -> dict:
-    """Quality/star score for one bar, memoized per base-window length.
 
-    Several setups resolve to the same window, and compute_quality_panel does
-    a dozen rolling passes over the whole frame, so recomputing it per setup
-    per symbol is the difference between a fast scan and a slow one."""
+def _quality_windows(setup_name: str, variant_settings) -> tuple:
+    """(base_days, tightness_window_days) for one setup's resolved settings
+    object (which may be an auto-detect variant, not the live Designer
+    settings) -- the single place both window lookups happen, so the two
+    QUALITY_*_FIELD dicts above are never consulted inconsistently."""
+    base_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
+    base_days = getattr(variant_settings, base_field, None) if base_field else None
+    tight_field = QUALITY_TIGHTNESS_WINDOW_FIELD.get(setup_name)
+    tightness_window_days = getattr(variant_settings, tight_field, None) if tight_field else base_days
+    return base_days, tightness_window_days
+
+
+def _quality_row(
+    cache: dict, enriched, eval_date, rs_series, benchmark_close, base_days: int, tightness_window_days: int = None,
+) -> dict:
+    """Quality/star score for one bar, memoized per (base, tightness) window pair.
+
+    Several setups resolve to the same window pair, and compute_quality_panel
+    does a dozen rolling passes over the whole frame, so recomputing it per
+    setup per symbol is the difference between a fast scan and a slow one."""
     base_days = int(base_days or 20)
-    if base_days not in cache:
+    tightness_window_days = int(tightness_window_days or base_days)
+    key = (base_days, tightness_window_days)
+    if key not in cache:
         try:
-            cache[base_days] = compute_quality_panel(
-                enriched, rs_rating=rs_series, benchmark_close=benchmark_close, base_days=base_days,
+            cache[key] = compute_quality_panel(
+                enriched, rs_rating=rs_series, benchmark_close=benchmark_close,
+                base_days=base_days, tightness_window_days=tightness_window_days,
             )
         except Exception:
-            cache[base_days] = None
-    panel = cache[base_days]
+            cache[key] = None
+    panel = cache[key]
     if panel is None or eval_date not in panel.index:
         return {}
     row = panel.loc[eval_date]
     out = {}
-    for key, value in row.items():
+    for k, value in row.items():
         if pd.isna(value):
             continue
-        out[key] = int(value) if key == "stars" else float(value)
+        out[k] = int(value) if k == "stars" else float(value)
     return out
 
 
@@ -520,10 +556,10 @@ def run_scan(
                 # every row so matches from different patterns are directly
                 # comparable -- each setup's own `score` column is on its own
                 # arbitrary scale and can't be ranked across setups.
-                base_days_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
-                base_days = getattr(best_variant_settings, base_days_field, None) if base_days_field else None
+                base_days, tightness_window_days = _quality_windows(setup_name, best_variant_settings)
                 record.update(
-                    _quality_row(quality_cache, enriched, eval_date, rs_series, benchmark_close, base_days)
+                    _quality_row(quality_cache, enriched, eval_date, rs_series, benchmark_close,
+                                base_days, tightness_window_days)
                 )
                 rows.append(record)
 
@@ -701,10 +737,10 @@ def find_approaching_pivot(
                 for overrides in PATTERN_SIZE_VARIANTS.get(setup_name, []):
                     for field in overrides:
                         record[field] = getattr(best["variant"], field, None)
-                base_days_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
-                base_days = getattr(best["variant"], base_days_field, None) if base_days_field else None
+                base_days, tightness_window_days = _quality_windows(setup_name, best["variant"])
                 record.update(
-                    _quality_row(quality_cache, enriched, eval_date, rs_series, benchmark_close, base_days)
+                    _quality_row(quality_cache, enriched, eval_date, rs_series, benchmark_close,
+                                base_days, tightness_window_days)
                 )
                 rows.append(record)
 
@@ -767,8 +803,7 @@ def scan_signals_over_history(
         if not close_panel.empty and DEFAULT_BENCHMARK_SYMBOL in close_panel.columns
         else None
     )
-    base_days_field = QUALITY_BASE_DAYS_FIELD.get(setup_name)
-    base_days = getattr(setup_settings, base_days_field, None) if base_days_field else None
+    base_days, tightness_window_days = _quality_windows(setup_name, setup_settings)
 
     out = {}
     for symbol, raw_df in history.items():
@@ -782,7 +817,8 @@ def scan_signals_over_history(
         if min_stars > 0:
             try:
                 quality = compute_quality_panel(
-                    enriched, rs_rating=rs_series, benchmark_close=benchmark_close, base_days=base_days,
+                    enriched, rs_rating=rs_series, benchmark_close=benchmark_close,
+                    base_days=base_days, tightness_window_days=tightness_window_days,
                 )
                 result["stars"] = quality["stars"].reindex(result.index)
                 result["quality_score"] = quality["quality_score"].reindex(result.index)

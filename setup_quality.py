@@ -105,6 +105,7 @@ def compute_quality_panel(
     benchmark_close: pd.Series = None,
     base_days: int = None,
     prior_move_lookback_days: int = 63,
+    tightness_window_days: int = None,
 ) -> pd.DataFrame:
     """Score every bar of `df` 0-6.5 and bucket into 1-6 stars.
 
@@ -114,12 +115,26 @@ def compute_quality_panel(
     for the RS-line bonus and safely omittable.
 
     `base_days` should be the setup's own consolidation window when known
-    (auto-detect picks a different one per match), so tightness and volume
-    dry-up are measured over the base the detector actually found rather
-    than a fixed guess.
-    """
+    (auto-detect picks a different one per match), so linearity and the
+    prior-move boundary are measured over the base the detector actually
+    found rather than a fixed guess.
+
+    `tightness_window_days` is a SEPARATE, usually SHORTER window for the
+    tightness and volume-dry-up components. This matters concretely: for
+    Breakout, `base_days` is `max_consolidation_days` (the full base, ~40
+    days by default), but the detector's own tightness check is against
+    `min_consolidation_days` (~16 days) -- the tail end of the base, after it
+    has narrowed. Scoring tightness over the full window instead measured
+    something the detector never claimed and, on 135 real Breakout trades,
+    came out **zero for every single one** (mean full-window range was 47%,
+    nowhere near any of the tightness tiers) -- a silently dead component,
+    not a mis-weighted one. Defaults to `base_days` for setups that don't
+    have a separate short window (the five O'Neil patterns, whose "base"
+    field already IS the tight part)."""
     base_days = int(base_days or DEFAULT_BASE_DAYS)
     base_days = max(2, base_days)
+    tightness_window_days = int(tightness_window_days or base_days)
+    tightness_window_days = max(2, min(tightness_window_days, base_days))
     df = df.copy()
 
     # --- make sure every input column exists -------------------------------
@@ -135,9 +150,9 @@ def compute_quality_panel(
         df["sma_50"] = df["close"].rolling(50).mean()
     if "sma_50_slope_pct" not in df.columns:
         df = add_sma_slope(df, period=50, lookback=20)
-    dryup_col = f"vol_dryup_{base_days}"
+    dryup_col = f"vol_dryup_{tightness_window_days}"
     if dryup_col not in df.columns:
-        df = add_volume_dryup(df, base_days=base_days, avg_period=50)
+        df = add_volume_dryup(df, base_days=tightness_window_days, avg_period=50)
     er_col = f"efficiency_ratio_{base_days}"
     if er_col not in df.columns:
         df = add_efficiency_ratio(df, window=base_days, col_name=er_col)
@@ -150,10 +165,25 @@ def compute_quality_panel(
     # so it's the genuine net advance, not a high-low range a choppy stock
     # could also satisfy. Both ends shift past the base so today's breakout
     # can't contribute to its own "prior" move.
+    #
+    # Tiering below is evidence-revised, not just theory: backtested against
+    # 135 real Breakout trades (400 symbols, 2022-2026), this is the ONLY one
+    # of the seven components whose relationship to becoming a big (trailing-
+    # stop-exit) winner was more than noise -- and it was a clean, monotonic
+    # one. Quartiles of this exact raw value against trail-exit rate:
+    #   Q1 (<=-6%)  -> 5.9%   Q2 (-6..9%) -> 20.6%
+    #   Q3 (9..30%) -> 21.2%  Q4 (>=30%)  -> 29.4%
+    # The OLD tiering (cliffs at 20/30/50%, zero below 20) missed this
+    # entirely: a -27% decline and a +19% advance both scored 0, despite the
+    # data showing the latter has ~3.5x the trail-exit rate of the former.
+    # This wider tiering is the one deliberate change made on that evidence;
+    # the other six components' correlations with trade outcome were all
+    # within noise at this sample size (n=135, |r|~0.1-0.2, not significant)
+    # and are left as originally designed rather than reweighted on chance.
     window_end_close = df["close"].shift(base_days + 1)
     window_start_close = df["close"].shift(base_days + prior_move_lookback_days)
     prior_net_move_pct = (window_end_close - window_start_close) / window_start_close * 100.0
-    out["q_prior_move"] = _tiered(prior_net_move_pct, (20.0, 30.0, 50.0), (0.5, 1.0, 1.5))
+    out["q_prior_move"] = _tiered(prior_net_move_pct, (0.0, 15.0, 30.0, 50.0), (0.4, 0.8, 1.2, 1.5))
 
     # --- 2. Above a rising 50-day (1.0) -----------------------------------
     # "I never buy a stock below its 50-day moving average." Split into
@@ -183,11 +213,12 @@ def compute_quality_panel(
     out["q_rs"] = rs_points.where(rs.notna(), 0.5)
 
     # --- 4. Base tightness (1.0) ------------------------------------------
-    # "The range should tighten from left to right." Measured over the base
-    # window excluding today, same as the detectors do.
-    base_high = df["high"].shift(1).rolling(base_days).max()
-    base_low = df["low"].shift(1).rolling(base_days).min()
-    base_range_pct = (base_high - base_low) / base_low * 100.0
+    # "The range should tighten from left to right." Measured over
+    # tightness_window_days (the RECENT/short window), not the full base --
+    # see the docstring above for why that distinction is load-bearing.
+    tight_high = df["high"].shift(1).rolling(tightness_window_days).max()
+    tight_low = df["low"].shift(1).rolling(tightness_window_days).min()
+    base_range_pct = (tight_high - tight_low) / tight_low * 100.0
     out["q_tightness"] = _tiered_below(base_range_pct, (15.0, 10.0, 6.0, 3.0), (0.25, 0.5, 0.75, 1.0))
 
     # --- 5. Volume dry-up then expansion (1.0) ----------------------------
