@@ -1555,11 +1555,16 @@ with tab_scanner:
             col_stars, col_topn = st.columns([2, 1])
             with col_stars:
                 min_stars = st.slider(
-                    "Minimum quality (stars)", 0, 6, 3, 1, key="scanner_min_stars",
+                    "Minimum quality (stars)", 0, 6, 0, 1, key="scanner_min_stars",
                     help="A 0-6.5 score across seven of Qullamaggie's documented criteria -- prior move, above "
                     "a rising 50-day, RS, base tightness, volume dry-up then expansion, moving-average "
-                    "alignment, and linearity -- bucketed into 1-6 stars. Note the star SCALE is this app's "
-                    "encoding of those criteria; he doesn't publish a numeric grade himself.",
+                    "alignment, and linearity -- bucketed into 1-6 stars. The star SCALE is this app's "
+                    "encoding of those criteria; he doesn't publish a numeric grade himself.\n\n"
+                    "DEFAULTS TO 0 ON PURPOSE. Backtested on Breakout, filtering to 3 stars raised the win "
+                    "rate (54.8% -> 56.6%) and CUT expectancy by 60% (0.473R -> 0.185R). The score selects "
+                    "for tight, orderly setups, which win more often but move less -- and Breakout's whole "
+                    "edge is a few huge trail exits. Use the stars to decide what to look at first (the list "
+                    "is sorted by them), not to throw candidates away.",
                 )
             with col_topn:
                 top_n = st.number_input(
@@ -1567,7 +1572,10 @@ with tab_scanner:
                     help="Cap on how many matches to display, after the star filter. The list is already "
                     "ranked best-first, so this only trims the tail.",
                 )
-            st.caption(f"Matched today, by quality -- {available}")
+            st.caption(
+                f"Matched today, by quality -- {available}. Sorted best-first; stars are a **reading order**, "
+                "not a filter (see the slider's help for why raising it measurably hurt Breakout)."
+            )
             filtered = results[results["stars"].fillna(0) >= min_stars]
             if filtered.empty:
                 st.warning(
@@ -3235,7 +3243,12 @@ with tab_orders:
                 help="Qullamaggie's own answer: \"most of the time 0.3-0.5%, rarely more than 1%.\"",
             )
         with col_stars2:
-            orders_min_stars = st.slider("Minimum stars", 0, 6, 4, 1, key="orders_min_stars")
+            orders_min_stars = st.slider(
+                "Minimum stars", 0, 6, 0, 1, key="orders_min_stars",
+                help="Defaults to 0 because raising it measurably hurt the one setup with a real edge -- "
+                "see \"Which system should I actually trade?\" below. Use the star column to decide which "
+                "tickets to place first, not which to discard.",
+            )
 
         setup_labels = sorted(scan_all["setup"].unique().tolist())
         # Momentum Burst and Breakout by default: the two setups whose hold
@@ -3440,6 +3453,14 @@ with tab_orders:
             "Double Bottom's and Flat Base's collapsed. Filtering out the signals that never traded "
             "through their trigger removes noise from a real edge and removes the *illusion* of one "
             "where the fills were doing the work.\n\n"
+            "**The star score does NOT work as a filter — know this before relying on it.** Backtested "
+            "across star thresholds, Breakout goes 0.473R (all matches) → 0.185R (3★+) → 0.269R (4★+). "
+            "Win rate climbs the whole way (54.8% → 56.6% → 60.0%) while expectancy falls. That's the "
+            "textbook failure of scoring a fat-tailed system: the seven components reward tight, quiet, "
+            "orderly setups, which win more often but travel less far — and Breakout's entire edge is the "
+            "handful of trades that run +3.6R. Cup with Handle is the exception (0.39 → 0.54 at 3★+), and "
+            "on Double Bottom the score is noise. Use the stars to decide **what to look at first**, not "
+            "what to discard. Both star sliders default to 0 for exactly this reason.\n\n"
             "**Two red flags in that table.** Double Bottom shows an 88% maximum drawdown across 490 "
             "trades — a barely-positive expectancy attached to a near-total loss of capital is not a "
             "tradeable system, it's a warning. And Episodic Pivot's 3 trades are far too few to conclude "

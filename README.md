@@ -11,13 +11,22 @@ Data comes from the [Financial Modeling Prep](https://financialmodelingprep.com/
 
 ## Two things worth knowing up front
 
-**Filter wide, rank hard.** Every one of Qullamaggie's criteria is real, but
-chained together with AND they encode "perfect or nothing" — at his own stated
-numbers the Breakout scan returned about 5 matches per 400 symbols. So the hard
-gates are deliberately loose and `setup_quality.py` scores each match 0–6.5
-across seven of those criteria (prior move, above a rising 50-day, RS, base
-tightness, volume dry-up then expansion, MA alignment, linearity), bucketed into
-1–6 stars. Tighten with the star slider, not the thresholds.
+**Filter wide, rank hard — but rank, don't filter.** Every one of Qullamaggie's
+criteria is real, but chained together with AND they encode "perfect or nothing"
+— at his own stated numbers the Breakout scan returned about 5 matches per 400
+symbols. So the hard gates are deliberately loose and `setup_quality.py` scores
+each match 0–6.5 across seven of those criteria (prior move, above a rising
+50-day, RS, base tightness, volume dry-up then expansion, MA alignment,
+linearity), bucketed into 1–6 stars.
+
+⚠️ **The stars are a reading order, not a quality gate.** Backtested across star
+thresholds, Breakout's expectancy goes 0.473R (all matches) → 0.185R (3★+) →
+0.269R (4★+) while its win rate rises the whole way (54.8% → 60.0%). The score
+rewards tight, orderly setups that win more often but travel less far, and
+Breakout's edge is the handful of trades that run +3.6R — so filtering on it
+trades away the tail that pays for everything. Cup with Handle is the exception
+(0.39 → 0.54 at 3★+); on Double Bottom it's noise. Both star sliders default to
+0. Use them to decide what to look at first.
 
 *The star scale is this project's encoding of his criteria.* He uses "first-tier"
 / "second-tier" language and never publishes a numeric grade; the popular
