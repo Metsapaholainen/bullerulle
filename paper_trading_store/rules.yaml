@@ -21,3 +21,13 @@ avoid_chase_adr_multiple: 1.5
 entry_delay_days: 1
 max_position_pct_of_avg_volume: 1.0
 ep_stop_mode_override: null
+regime_filter_enabled: false
+regime_drawdown_lookback_days: 252
+regime_max_drawdown_pct: -15.0
+regime_vol_lookback_days: 20
+regime_vol_percentile_window_days: 504
+regime_vol_percentile_threshold: 85.0
+regime_combine_mode: any
+regime_action: downsize
+regime_size_multiplier: 0.5
+regime_apply_to_short: false
