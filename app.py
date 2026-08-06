@@ -488,11 +488,26 @@ with st.sidebar:
     builtin_names = presets.list_builtin_presets()
     existing = presets.list_presets()
     preset_options = ["(current)"] + [f"⭐ {n}" for n in builtin_names] + existing
-    chosen = st.selectbox("Load preset", preset_options, help="⭐ presets are built-in, sourced directly from Qullamaggie's documented small/mid-cap vs large-cap thresholds.")
-    if chosen != "(current)" and st.button("Apply selected preset"):
-        st.session_state.settings = presets._resolve_preset(chosen)
-        st.session_state.settings_version += 1
-        st.rerun()
+
+    def _apply_chosen_preset():
+        # Picking a preset applies it immediately -- no separate "Apply"
+        # click. That extra step was easy to miss (select a preset, run a
+        # scan, and it silently keeps running on whatever was active
+        # before), which is exactly the kind of thing that makes a looser
+        # preset look like it's finding fewer matches than the one you
+        # thought you'd switched away from.
+        chosen_now = st.session_state.get("preset_selectbox", "(current)")
+        if chosen_now != "(current)":
+            st.session_state.settings = presets._resolve_preset(chosen_now)
+            st.session_state.settings_version += 1
+            st.session_state.preset_just_applied = chosen_now
+
+    st.selectbox(
+        "Load preset", preset_options, key="preset_selectbox", on_change=_apply_chosen_preset,
+        help="⭐ presets are built-in, sourced directly from Qullamaggie's documented small/mid-cap vs large-cap thresholds. Applies as soon as you pick it.",
+    )
+    if st.session_state.pop("preset_just_applied", None):
+        st.success(f"Applied preset '{st.session_state.get('preset_selectbox')}'.")
 
     new_name = st.text_input("Save current settings as")
     if st.button("Save preset") and new_name:
