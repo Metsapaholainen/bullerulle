@@ -7,5 +7,8 @@ python-dotenv>=1.0
 PyYAML>=6.0
 pyarrow>=17.0
 
+# BullaRullaEP's catalyst_classifier.py (LLM news-catalyst classification)
+anthropic>=0.40
+
 # Dev/test only
 pytest>=8.0

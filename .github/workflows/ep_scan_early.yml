@@ -1,0 +1,49 @@
+name: BullaRullaEP scan (early)
+
+# Pass 1 of BullaRullaEP's two-pass daily schedule: the overnight catalyst
+# watchlist. Cron is UTC and fixed at 6:00, i.e. ~9:00 Finnish summer time
+# (EEST, UTC+3) -- drifts to ~8:00 Finnish local time during winter (EET,
+# UTC+2), same one-cron-entry tolerance the parent project's sell_alerts.yml
+# already accepts for its own schedule. This pass is deliberately early and
+# only ever produces an INFORMATIONAL alert -- premarket gap/volume isn't
+# confirmed until ep_scan_confirm.yml runs, right before the US open.
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  scan-early:
+    runs-on: ubuntu-latest
+    # Needed so this job can persist today's candidate list (for
+    # ep_scan_confirm.yml to read) and the running alert log via
+    # github_store.py -- otherwise the auto-provided GITHUB_TOKEN below is
+    # read-only and both writes would silently fail to save.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Run early catalyst-watchlist scan
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # Optional: a separate ntfy topic just for EP alerts, so they
+          # don't mix into whatever else is subscribed to NTFY_TOPIC. Falls
+          # back to NTFY_TOPIC if unset -- not required.
+          NTFY_TOPIC_EP: ${{ secrets.NTFY_TOPIC_EP }}
+          # Powers the LLM catalyst-quality classifier
+          # (bullarullaep/catalyst_classifier.py). Degrades gracefully (no
+          # bonus, no crash) if unset.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # GitHub Actions auto-provides this per-run token -- no separate
+          # PAT needed here (see DEPLOY.md for why Streamlit Cloud needs one
+          # but this runner doesn't).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m bullarullaep.cli scan-early

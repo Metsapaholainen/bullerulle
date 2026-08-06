@@ -4,8 +4,10 @@ __pycache__/
 .env
 cache/*.parquet
 cache/fundamentals/
+cache/ep_pit_fundamentals/
 presets_store/*.yaml
 paper_trading_store/
+bullarullaep_store/
 watchlist.yaml
 scan_*.csv
 .streamlit/secrets.toml

@@ -237,3 +237,66 @@ def get_earnings_dates(
         if sym in symbol_set and result.get(sym) is None:
             result[sym] = row.get("date")
     return result
+
+
+def _earnings_calendar_window_cache_path(as_of: str, lookback_days: int, lookahead_days: int) -> Path:
+    return FUNDAMENTALS_CACHE_DIR / f"_earnings_calendar_window_{as_of}_{lookback_days}_{lookahead_days}.json"
+
+
+def get_earnings_dates_window(
+    client: FMPClient, symbols: list, as_of, lookback_days: int = 3, lookahead_days: int = 14,
+    ttl_seconds: float = EARNINGS_TTL_SECONDS,
+) -> dict:
+    """Like get_earnings_dates() above, but also looks BACKWARD. That
+    function (and fundamentals_classifier.days_to_earnings/
+    filter_earnings_avoidance built on it) only ever supports *avoiding* a
+    trade near an upcoming earnings date -- useful for the rest of this
+    codebase's setups, useless for an episodic-pivot scanner, which needs
+    the opposite: confirming that today's gap coincides with a JUST-reported
+    catalyst, not suppressing near one.
+
+    Returns {symbol: {"most_recent_report_date": "YYYY-MM-DD" or None,
+    "next_report_date": "YYYY-MM-DD" or None}} covering the window
+    [as_of - lookback_days, as_of + lookahead_days]. "most_recent" only
+    considers dates <= as_of (today counts); "next" only considers dates
+    strictly after as_of."""
+    import pandas as pd
+
+    path = _earnings_calendar_window_cache_path(str(as_of), lookback_days, lookahead_days)
+    rows = None
+    if path.exists():
+        try:
+            with open(path, "r") as f:
+                cached = json.load(f)
+            if (time.time() - cached.get("fetched_at", 0)) < ttl_seconds:
+                rows = cached["rows"]
+        except Exception:
+            rows = None
+
+    as_of_ts = pd.Timestamp(as_of)
+    if rows is None:
+        from_date = (as_of_ts - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        to_date = (as_of_ts + pd.Timedelta(days=lookahead_days)).strftime("%Y-%m-%d")
+        rows = client.earnings_calendar(from_date=from_date, to_date=to_date)
+        FUNDAMENTALS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"fetched_at": time.time(), "rows": rows}, f)
+
+    symbol_set = set(symbols)
+    result = {sym: {"most_recent_report_date": None, "next_report_date": None} for sym in symbols}
+    for row in rows:
+        sym = row.get("symbol")
+        date = row.get("date")
+        if sym not in symbol_set or not date:
+            continue
+        date_ts = pd.Timestamp(date)
+        entry = result[sym]
+        if date_ts <= as_of_ts:
+            prev = entry["most_recent_report_date"]
+            if prev is None or date_ts > pd.Timestamp(prev):
+                entry["most_recent_report_date"] = date
+        else:
+            nxt = entry["next_report_date"]
+            if nxt is None or date_ts < pd.Timestamp(nxt):
+                entry["next_report_date"] = date
+    return result

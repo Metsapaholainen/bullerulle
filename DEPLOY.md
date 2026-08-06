@@ -149,3 +149,49 @@ To turn it on:
    scheduled job picks them up on its next run. Without `GITHUB_TOKEN`
    configured, live edits only live on Cloud's ephemeral disk and won't be
    seen by this job -- only the committed `master` copy will.
+
+## BullaRullaEP: the episodic-pivot scanner's scheduled jobs
+
+BullaRullaEP (`bullarullaep/`) is a separate, headless, episodic-pivot-only
+scanner living inside this repo -- no Streamlit UI of its own, no page to
+keep open. It runs entirely as two GitHub Actions workflows that push
+ntfy.sh phone notifications: `.github/workflows/ep_scan_early.yml` (an
+overnight catalyst watchlist, ~9:00 Finnish time) and
+`.github/workflows/ep_scan_confirm.yml` (the real, actionable stop-buy-
+with-limit alert, confirmed against a live premarket quote right before the
+US open, ~9:15 ET). See `bullarullaep/__init__.py` and
+`bullarullaep/scan_early.py`/`scan_confirm.py` for how the two passes work.
+
+To turn it on:
+
+1. In the GitHub repo, go to **Settings → Secrets and variables → Actions**
+   and add:
+   - `FMP_API_KEY` -- the same key used above.
+   - `NTFY_TOPIC` -- the same topic subscribed to above (or set
+     `NTFY_TOPIC_EP` instead/as well for a dedicated topic, so EP alerts
+     don't mix into Sell Alerts notifications).
+   - `ANTHROPIC_API_KEY` -- powers the LLM catalyst-quality classifier
+     (`bullarullaep/catalyst_classifier.py`). Optional: if unset, that
+     scoring bonus is simply skipped (no crash, no gate on matches) -- get a
+     key at https://console.anthropic.com/ if you want it.
+
+   No separate `GITHUB_TOKEN` secret is needed -- GitHub Actions
+   auto-provides one per run, and both workflow files already grant it
+   `contents: write` so `bullarullaep/watchlist_store.py` can hand pass-1's
+   candidates to pass-2 and log real alerts via the `data-store` branch.
+2. That's it -- both workflows run automatically on their own schedule. To
+   test either immediately rather than waiting: go to the repo's **Actions**
+   tab, pick **"BullaRullaEP scan (early)"** or **"BullaRullaEP scan
+   (confirm)"**, and click **"Run workflow"**.
+3. `bullarullaep/settings.py::EPConfig` controls every threshold (gap %,
+   volume ratio, growth floor, catalyst-classifier confidence bar, etc.) --
+   edit `bullarullaep/config/default_ep_settings.yaml` (created on first
+   `EPConfig.save()`, or hand-write one) and pass `--config` to
+   `python -m bullarullaep.cli` to use it, locally or from the workflow.
+4. Backtest before trusting it live:
+   `python -m bullarullaep.cli backtest --start 2022-08-01 --end <today>`.
+   See `bullarullaep/detector.py`'s module docstring for what is and isn't
+   backtestable (the catalyst-classifier and social-sentiment bonuses are
+   live-only signals -- no historical news/sentiment archive exists to
+   backtest them against honestly, so the backtest measures the EOD hard
+   gates + point-in-time growth/EPS-beat scoring only).

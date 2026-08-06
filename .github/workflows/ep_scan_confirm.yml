@@ -1,0 +1,38 @@
+name: BullaRullaEP scan (confirm)
+
+# Pass 2 of BullaRullaEP's two-pass daily schedule: the pre-open premarket
+# confirmation. Cron is UTC and fixed at 13:15, i.e. ~9:15 ET summer time
+# (EDT, UTC-4) -- drifts to ~8:15 ET during winter (EST, UTC-5), same
+# one-cron-entry tolerance the parent project's sell_alerts.yml already
+# accepts for its own schedule. This is the pass that sends the actual
+# actionable stop-buy-with-limit order ticket, right before the US market
+# opens at 9:30 ET.
+on:
+  schedule:
+    - cron: "15 13 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  scan-confirm:
+    runs-on: ubuntu-latest
+    # Needed so this job can read pass 1's saved candidate list and persist
+    # the running real-alert log via github_store.py.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Run premarket confirmation scan and alert
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOPIC_EP: ${{ secrets.NTFY_TOPIC_EP }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m bullarullaep.cli scan-confirm

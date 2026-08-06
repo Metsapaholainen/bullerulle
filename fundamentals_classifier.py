@@ -103,6 +103,26 @@ def days_to_earnings(symbol: str, earnings_dates: dict, as_of) -> Optional[int]:
     return int((pd.Timestamp(next_date) - pd.Timestamp(as_of)).days)
 
 
+def days_since_earnings(symbol: str, earnings_dates_window: dict, as_of) -> Optional[int]:
+    """Companion to days_to_earnings, built for the opposite question: an
+    episodic-pivot scanner wants to POSITIVELY CONFIRM a gap coincides with a
+    just-reported catalyst, not suppress trades near one. Takes the
+    `{symbol: {"most_recent_report_date": ..., "next_report_date": ...}}`
+    shape from data/fundamentals_cache.py::get_earnings_dates_window() (NOT
+    the forward-only get_earnings_dates() dict days_to_earnings() above
+    uses). Returns days since the most recent report (0 = today), or None if
+    no report was found in the queried window."""
+    if not earnings_dates_window:
+        return None
+    info = earnings_dates_window.get(symbol)
+    if not info:
+        return None
+    most_recent = info.get("most_recent_report_date")
+    if not most_recent:
+        return None
+    return int((pd.Timestamp(as_of) - pd.Timestamp(most_recent)).days)
+
+
 def filter_earnings_avoidance(rows_df: pd.DataFrame, earnings_dates: dict, as_of, avoid_days_before: int = 3) -> pd.DataFrame:
     """'Avoid buying 3-days before earnings' (Qullamaggie's Laws of Swing) --
     applies to ANY setup's scan output, not just Episodic Pivot. Drops rows

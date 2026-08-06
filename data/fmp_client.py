@@ -16,6 +16,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_URL = "https://financialmodelingprep.com/stable"
+# FMP's social-sentiment endpoint predates the "stable" API generation and
+# still lives under the older v4 path -- everything else in this file is on
+# `BASE_URL`, this one alone needs a different base (see social_sentiment()).
+LEGACY_V4_BASE_URL = "https://financialmodelingprep.com/api/v4"
 
 ENDPOINTS = {
     "company_screener": "/company-screener",
@@ -27,6 +31,9 @@ ENDPOINTS = {
     "earnings_calendar": "/earnings-calendar",
     "earnings_company": "/earnings",
     "insider_trade_statistics": "/insider-trading/statistics",
+    "stock_news": "/news/stock",
+    "press_releases": "/news/press-releases",
+    "social_sentiment": "/historical/social-sentiment",
 }
 
 
@@ -70,10 +77,10 @@ class FMPClient:
         self.backoff_seconds = backoff_seconds
         self.session = requests.Session()
 
-    def _get(self, path: str, params: Optional[dict] = None) -> Any:
+    def _get(self, path: str, params: Optional[dict] = None, base_url: str = BASE_URL) -> Any:
         params = dict(params or {})
         params["apikey"] = self.api_key
-        url = f"{BASE_URL}{path}"
+        url = f"{base_url}{path}"
         # Tracks *why* every attempt failed, whether that was a raised
         # exception (timeout, connection error) or a repeated 429 rate-limit
         # response -- a 429 never raises requests.RequestException, so
@@ -195,4 +202,58 @@ class FMPClient:
         """Wraps /insider-trade-statistics -- best-effort/optional; some FMP
         plan tiers may not include this, so callers should tolerate FMPError."""
         data = self._get(ENDPOINTS["insider_trade_statistics"], params={"symbol": symbol})
+        return data if isinstance(data, list) else []
+
+    def stock_news(self, symbols: Optional[list] = None, from_date: Optional[str] = None,
+                    to_date: Optional[str] = None, limit: int = 50) -> list:
+        """Wraps /news/stock -- title/text/publishedDate/site/url per
+        article (field is `title`, not `headline`), the raw material for
+        catalyst classification. `symbols` is a list, comma-joined for the
+        API -- unlike /quote, multi-symbol batching here is verified live
+        to work correctly (confirmed returning articles for all requested
+        symbols in one call). Omit `symbols` for the latest market-wide
+        feed. Confirmed working on this project's current FMP plan tier."""
+        params: dict = {"limit": limit}
+        if symbols:
+            params["symbols"] = ",".join(symbols)
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        data = self._get(ENDPOINTS["stock_news"], params=params)
+        return data if isinstance(data, list) else []
+
+    def press_releases(self, symbols: Optional[list] = None, from_date: Optional[str] = None,
+                        to_date: Optional[str] = None, limit: int = 50) -> list:
+        """Wraps /news/press-releases -- official company press releases
+        (earnings reports, guidance, M&A, contracts), generally a cleaner
+        catalyst signal than general news since it's company-sourced rather
+        than third-party commentary. Same symbols/date-range shape as
+        stock_news(). CONFIRMED UNAVAILABLE on this project's current FMP
+        plan tier (live-tested: HTTP 402 Payment Required) -- callers must
+        tolerate FMPError. Kept so the code path exists if the plan is ever
+        upgraded; stock_news() is the primary catalyst-headline source for
+        now."""
+        params: dict = {"limit": limit}
+        if symbols:
+            params["symbols"] = ",".join(symbols)
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        data = self._get(ENDPOINTS["press_releases"], params=params)
+        return data if isinstance(data, list) else []
+
+    def social_sentiment(self, symbol: str, page: int = 0) -> list:
+        """Wraps the legacy v4 /historical/social-sentiment endpoint --
+        aggregated StockTwits/Reddit/Twitter chatter for a symbol: an
+        absolute mention-volume index and a positive/negative sentiment
+        split, updated hourly per FMP's docs. CONFIRMED UNAVAILABLE on this
+        project's current FMP plan tier (live-tested: HTTP 403 Forbidden) --
+        callers must tolerate FMPError. `EPSettings.enable_social_sentiment`
+        defaults to False for exactly this reason; this method exists so the
+        plumbing is ready if the plan is ever upgraded."""
+        data = self._get(
+            ENDPOINTS["social_sentiment"], params={"symbol": symbol, "page": page}, base_url=LEGACY_V4_BASE_URL
+        )
         return data if isinstance(data, list) else []

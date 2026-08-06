@@ -40,6 +40,35 @@ proven.
 
 Data comes from the [Financial Modeling Prep](https://financialmodelingprep.com/) API.
 
+## BullaRullaEP: a separate, episodic-pivot-only scanner
+
+`bullarullaep/` is a from-scratch, headless sub-project living in this same
+repo, focused purely on Qullamaggie/Stockbee-style episodic pivots (a gap
+up 10%+ on huge volume, on a real catalyst, out of a neglected base) --
+nothing else. No Streamlit UI: it runs as two scheduled GitHub Actions jobs
+per trading day (an early overnight-catalyst pass, then a pre-open
+premarket-confirmation pass) that push phone notifications with a ready-to-
+place stop-buy-with-limit order ticket. It adds point-in-time-correct
+fundamentals (fixing a real look-ahead-bias risk in this scanner's own
+`episodic_pivot.py`), a backward-looking earnings-catalyst check, an LLM
+news-catalyst quality classifier, and an exploratory social-sentiment
+signal. See `bullarullaep/__init__.py` and the "BullaRullaEP" section in
+`DEPLOY.md` for setup.
+
+⚠️ **Honest headline, measured not guessed: the backtestable core alone did
+not show an edge.** Across the cached 2,610-symbol universe (2023-06 to
+2026-06), the EOD hard gates + point-in-time growth/EPS-beat scoring
+produced 10 trades: 40% win rate, -0.25R expectancy, Sharpe -0.22, ~flat
+CAGR. Small sample, genuinely negative on what's measurable offline. Two
+things this number does NOT include, because neither is honestly
+backtestable with the data available (no historical premarket-quote or
+news archive): the pass-2 premarket gap/volume confirmation, and the LLM
+catalyst-quality classifier's bonus -- both are live-only signals, so this
+backtest measures a strictly weaker version of the system than what
+actually runs daily. Treat the live two-pass alerts (and the running alert
+log in `bullarullaep/watchlist_store.py`) as the real test, not this
+number alone.
+
 ## Two things worth knowing up front
 
 **Filter wide, rank hard — but rank, don't filter.** Every one of Qullamaggie's
