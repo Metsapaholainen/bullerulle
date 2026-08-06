@@ -1521,6 +1521,14 @@ with tab_scanner:
             "the sidebar (it re-applies even when the dropdown already shows the preset you want)."
         )
         if st.button("Re-enable Squeeze & Pullback"):
+            if not hasattr(settings, "squeeze") or not hasattr(settings, "pullback"):
+                # Guards against a stale st.session_state.settings object
+                # from before Squeeze/Pullback existed (e.g. a browser tab
+                # left open across a redeploy) -- patching fields that were
+                # never there to begin with is meaningless, so replace the
+                # whole object with a fresh default instead of crashing.
+                st.session_state.settings = presets.load_default()
+                settings = st.session_state.settings
             settings.squeeze.enabled = True
             settings.pullback.enabled = True
             # Bump so the Designer tab's per-setup "Enabled" checkbox (keyed
