@@ -27,6 +27,16 @@ trades:
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
   notes: ''
+  entry_date: '2026-08-03'
+  entry_price: 5.4054
+  partial_date: null
+  partial_price: null
+  exit_date: '2026-08-06'
+  exit_price: 5.098087128706146
+  exit_reason: stop
+  r_multiple: -1.0
+  pnl: -113.70587608460221
+  status: Loss
 - symbol: CBZ
   decision_date: '2026-07-31'
   setup_tag: 5 Day Gainers
