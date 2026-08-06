@@ -269,7 +269,51 @@ def _spring_diagram():
     )
 
 
+def _squeeze_diagram():
+    # A prior advance into a tight, quiet coil -- the marker sits ON the
+    # coiled day itself, BEFORE the pivot line is crossed, with the stop-buy
+    # entry zone resting just above it. This is the visual contrast with
+    # Breakout's diagram: the star/marker there sits ABOVE the pivot line
+    # (already broken out); here it sits AT/BELOW it (still coiled).
+    y = _curve(
+        [(0, 1.0), (0.4, 1.5), (0.55, 1.48), (0.7, 1.50), (0.82, 1.49), (0.9, 1.505), (1.0, 1.51)],
+        ripple_regions=[(0.55, 0.9, 0.006)],
+    )
+    return _figure(
+        y,
+        [
+            (0.0, 0.4, "Prior move", "rgba(100,149,237,0.10)"),
+            (0.55, 0.9, "Coiled -- range tight vs. own ADR", "rgba(100,149,237,0.20)"),
+        ],
+        marker_x_frac=0.9, marker_label="Squeeze: stop-buy rests above here", marker_color="lime",
+        pivot=(1.52, 0.55, 1.0),
+        entry_zone=(0.87, 0.94, "Resting stop-buy zone", _BUY_ENTRY_STYLE),
+    )
+
+
+def _pullback_diagram():
+    # An extended move away from a rising EMA, then a shallow pullback BACK
+    # to the EMA on light volume -- entry is AT the pocket, not at a new
+    # high, which is what makes this style structurally unable to feel
+    # "late" the way a breakout entry can.
+    y = _curve(
+        [(0, 1.0), (0.3, 1.05), (0.55, 1.45), (0.68, 1.42), (0.8, 1.18), (0.88, 1.16), (1.0, 1.30)],
+        ripple_regions=[(0.0, 0.3, 0.01)],
+    )
+    ema = _curve([(0, 1.0), (0.3, 1.03), (0.55, 1.10), (0.8, 1.16), (1.0, 1.20)])
+    fig = _figure(
+        y,
+        [(0.3, 0.68, "Extension away from the EMA", "rgba(100,149,237,0.10)")],
+        marker_x_frac=0.88, marker_label="Pullback entry (at the EMA)", marker_color="lime",
+        entry_zone=(0.85, 0.92, "Entry zone", _BUY_ENTRY_STYLE),
+    )
+    fig.add_trace(go.Scatter(x=list(range(N)), y=ema, mode="lines", line=dict(width=1.5, color="orange", dash="dot"), showlegend=False))
+    return fig
+
+
 PATTERN_DIAGRAMS = {
+    "squeeze": _squeeze_diagram,
+    "pullback": _pullback_diagram,
     "breakout": _breakout_diagram,
     "episodic_pivot": _episodic_pivot_diagram,
     "parabolic_short": _parabolic_short_diagram,

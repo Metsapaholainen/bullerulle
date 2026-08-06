@@ -21,8 +21,41 @@ rs_rating:
   lookback_periods: [63, 126, 189, 252]
   period_weights: [0.4, 0.2, 0.2, 0.2]
 
-breakout:
+squeeze:
   enabled: true
+  min_rs_rating: 75
+  ma_period: 50
+  require_above_ma: true
+  require_rising_ma: true
+  ma_slope_lookback_days: 20
+  min_ma_slope_pct: 0.0
+  range_window_days: 5
+  adr_lookback_days: 20
+  max_range_to_adr_ratio: 1.5
+  pivot_lookback_days: 50
+  prior_move_lookback_days: 63
+  min_prior_move_pct: 15.0          # large caps move less dramatically than small/mid caps
+  volume_avg_period: 50
+  min_adr_pct: 2.0                  # large caps have a naturally smaller ADR% than small/mid caps
+
+pullback:
+  enabled: true
+  ema_period: 20
+  ema_slope_lookback_days: 10
+  min_ema_slope_pct: 0.0
+  min_rs_rating: 80
+  extension_lookback_days: 20
+  min_extension_adr_multiple: 2.0
+  max_pullback_distance_adr_multiple: 1.0
+  min_bars_since_last_touch: 10
+  volume_avg_period: 50
+  pullback_window_days: 3
+  max_pullback_volume_ratio: 0.9
+  adr_lookback_days: 20
+  min_adr_pct: 1.5                  # large caps have a naturally smaller ADR% than small/mid caps
+
+breakout:
+  enabled: false
   min_adr_pct: 2.5                  # large caps have a naturally smaller ADR% than small/mid caps
   adr_lookback_days: 20
   prior_move_lookback_days: 63
@@ -54,7 +87,7 @@ breakout:
   require_close_confirmation: false
 
 episodic_pivot:
-  enabled: true
+  enabled: false
   min_gap_pct: 10.0
   min_volume_ratio: 2.0
   volume_avg_period: 50
@@ -71,7 +104,7 @@ episodic_pivot:
   require_growth_floor: false
 
 parabolic_short:
-  enabled: true
+  enabled: false
   ema_period: 20
   min_extension_adr_multiple: 3.0
   min_run_up_pct: 50.0              # "50-100%+ if larger cap"
@@ -79,7 +112,7 @@ parabolic_short:
   consecutive_up_days_min: 3
 
 cup_with_handle:
-  enabled: true
+  enabled: false
   cup_lookback_days: 130
   left_peak_days: 40
   handle_lookback_days: 15
@@ -94,7 +127,7 @@ cup_with_handle:
   volume_avg_period: 50
 
 double_bottom:
-  enabled: true
+  enabled: false
   pattern_lookback_days: 50
   min_depth_pct: 10.0
   max_depth_pct: 40.0
@@ -103,7 +136,7 @@ double_bottom:
   volume_avg_period: 50
 
 flat_base:
-  enabled: true
+  enabled: false
   base_days: 25
   max_range_pct: 15.0
   prior_move_lookback_days: 40
@@ -112,7 +145,7 @@ flat_base:
   volume_avg_period: 50
 
 ascending_base:
-  enabled: true
+  enabled: false
   pattern_lookback_days: 70
   min_segment_depth_pct: 5.0
   max_segment_depth_pct: 25.0
@@ -120,7 +153,7 @@ ascending_base:
   volume_avg_period: 50
 
 high_tight_flag:
-  enabled: true
+  enabled: false
   run_up_lookback_days: 30
   min_run_up_pct: 100.0
   flag_lookback_days: 20
@@ -129,7 +162,7 @@ high_tight_flag:
   volume_avg_period: 50
 
 momentum_burst:
-  enabled: true
+  enabled: false
   min_gain_pct: 3.5
   require_volume_above_prior: true
   min_volume: 100000
@@ -152,7 +185,7 @@ momentum_burst:
   adr_lookback_days: 20
 
 vcp:
-  enabled: true
+  enabled: false
   vcp_lookback_days: 90
   swing_order_days: 3
   min_legs: 2
@@ -176,7 +209,7 @@ vcp:
   fakeout_penalty_score: 1.0
 
 spring:
-  enabled: true
+  enabled: false
   range_lookback_days: 40
   max_range_pct: 30.0
   volume_dryup_ratio_max: 0.85

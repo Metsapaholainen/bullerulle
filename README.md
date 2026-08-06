@@ -1,23 +1,42 @@
 # Qullamaggie-Style Momentum Scanner & Backtester
 
-A local scanner + backtester for Kristjan Kullamägi ("Qullamaggie")-style momentum
-swing setups: **Breakout**, **Episodic Pivot**, and **Parabolic Short**, plus five
-O'Neil chart patterns, Stockbee's **Momentum Burst**, Minervini's **VCP**, and a
-Wyckoff-style **Spring**. All thresholds are adjustable, presets are
-saveable/comparable, and there's a reverse parameter finder that
+A local scanner + backtester for momentum swing trading. Two primary systems are
+scanned by default: **Squeeze** (fires on the quiet/coiled day, before a breakout
+prints, so you catch the move live instead of chasing an already-confirmed high)
+and **Pullback** (buy the first shallow pullback to a rising EMA in an
+already-confirmed leader, never chasing a new high). Eleven older
+Kristjan Kullamägi ("Qullamaggie")-style and O'Neil-style setups -- **Breakout**,
+**Episodic Pivot**, **Parabolic Short**, five O'Neil chart patterns, Stockbee's
+**Momentum Burst**, Minervini's **VCP**, and a Wyckoff-style **Spring** -- are
+kept, off by default, for reference (see "Which system should I actually trade?"
+in the app for the measured status of each). All thresholds are adjustable,
+presets are saveable/comparable, and there's a reverse parameter finder that
 reverse-engineers what settings would have captured a specific stock's past move.
 
-**Anti-crowd features (opt-in, off by default), for when the plain Breakout scan
-is crowded enough to be gameable:** VCP and Spring detect structurally different,
-less-common setups (a genuine multi-leg contraction, and a shakeout-before-breakout
-that fires before price even breaks its base). A recent-fakeout filter and a
-close-confirmation requirement on Breakout/VCP target the fact that a bare
-resistance level is an easy, gameable trigger. A regime/crowding filter can
-downsize or gate new entries during a market drawdown or high-volatility stretch,
-per the momentum-crash literature (Daniel & Moskowitz, NBER w20439/JFE 2016). See
-each setup's own explanation in the app (or `setups/explanations.py`) for the
-actual measured numbers -- treat all of this as promising, not proven; only
-Spring so far has a real trade sample (229 trades on the full cached universe).
+⚠️ **Honest headline, measured not guessed: on this data, none of these systems**
+**beat simply buying and holding the index.** SPY returned +25.0% CAGR and QQQ
++30.2% CAGR over the same 2022-2026 measured window; Breakout's own full-universe
+CAGR was -9.4%, Squeeze's was -30.7%. A positive per-trade expectancy (R-multiple)
+is not the same as the portfolio actually compounding faster than a passive
+index -- position sizing and correlation across many simultaneously-open
+small-cap positions matter enormously. Squeeze in particular fires far more often
+than Breakout (a "quiet, coiled" state is structurally more common than a
+"confirmed breakout"), which keeps more correlated positions open at once than
+the shared default position sizing (10 concurrent slots, 20% of equity each) was
+built for -- its entry timing is a real fix for "the breakout already happened,"
+its position sizing is not yet. See `setups/explanations.py` and the app's
+"Which system should I actually trade?" panel for the full numbers, including
+where each system fell short.
+
+**Anti-crowd features on the older setups (opt-in, off by default):** VCP and
+Spring detect structurally different, less-common setups (a genuine multi-leg
+contraction, and a shakeout-before-breakout that fires before price even breaks
+its base). A recent-fakeout filter and a close-confirmation requirement on
+Breakout/VCP target the fact that a bare resistance level is an easy, gameable
+trigger. A regime/crowding filter can downsize or gate new entries during a
+market drawdown or high-volatility stretch, per the momentum-crash literature
+(Daniel & Moskowitz, NBER w20439/JFE 2016). Treat all of this as exploratory, not
+proven.
 
 Data comes from the [Financial Modeling Prep](https://financialmodelingprep.com/) API.
 

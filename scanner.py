@@ -54,6 +54,8 @@ def history_lookback_days(settings: Settings) -> int:
         settings.high_tight_flag.flag_lookback_days + settings.high_tight_flag.run_up_lookback_days + 30,
         settings.vcp.vcp_lookback_days + settings.vcp.prior_move_lookback_days + 30,
         settings.spring.range_lookback_days + 30,
+        settings.squeeze.pivot_lookback_days + settings.squeeze.prior_move_lookback_days + 30,
+        settings.pullback.extension_lookback_days + 30,
         max(settings.rs_rating.lookback_periods) + 30,
         max(settings.universe.momentum_timeframes_days, default=0) + 30,
         300,  # floor so sma_200 etc. have room even with small windows configured

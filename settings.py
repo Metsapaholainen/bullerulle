@@ -51,7 +51,11 @@ class BreakoutSettings:
     # (0-6.5 -> 1-6 stars) instead of being a cliff, so a stock with RS 84
     # still surfaces and simply ranks below one with RS 98. Filter wide, rank
     # hard: use the Scanner's "minimum stars" control to tighten, not these.
-    enabled: bool = True
+    # Off by default -- Squeeze/Pullback are the primary systems now (see
+    # setups/squeeze.py, setups/pullback.py). Breakout DOES have real
+    # measured edge (+0.47R, PF 2.15, n=135) but chases an already-confirmed
+    # move; it's kept here, one click away in the Designer tab, not deleted.
+    enabled: bool = False
     min_adr_pct: float = 3.5
     adr_lookback_days: int = 20
     prior_move_lookback_days: int = 63
@@ -114,7 +118,7 @@ class BreakoutSettings:
 
 @dataclass
 class EpisodicPivotSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; unmeasured (n=3), too small a sample to trust
     min_gap_pct: float = 10.0
     min_volume_ratio: float = 2.0
     volume_avg_period: int = 50
@@ -150,7 +154,7 @@ class EpisodicPivotSettings:
 
 @dataclass
 class ParabolicShortSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; unmeasured
     ema_period: int = 20
     min_extension_adr_multiple: float = 3.0
     min_run_up_pct: float = 100.0
@@ -160,7 +164,7 @@ class ParabolicShortSettings:
 
 @dataclass
 class CupWithHandleSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; unmeasured
     cup_lookback_days: int = 130          # ~26 weeks, the window searched for the cup
     left_peak_days: int = 40              # portion of that window treated as "the left side high"
     handle_lookback_days: int = 15        # ~3 weeks, the most recent sub-window treated as the handle
@@ -177,7 +181,7 @@ class CupWithHandleSettings:
 
 @dataclass
 class DoubleBottomSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; measured 88% max drawdown, disqualifying
     pattern_lookback_days: int = 50       # ~10 weeks, split into three segments: low1 / peak / low2
     min_depth_pct: float = 10.0
     max_depth_pct: float = 40.0
@@ -188,7 +192,7 @@ class DoubleBottomSettings:
 
 @dataclass
 class FlatBaseSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; measured negative (-0.06R)
     base_days: int = 25                   # ~5 weeks, O'Neil's minimum flat-base length
     max_range_pct: float = 15.0
     prior_move_lookback_days: int = 40
@@ -199,7 +203,7 @@ class FlatBaseSettings:
 
 @dataclass
 class AscendingBaseSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; unmeasured
     pattern_lookback_days: int = 70       # ~14 weeks across 3 segments (a staircase of pullbacks)
     min_segment_depth_pct: float = 5.0
     max_segment_depth_pct: float = 25.0
@@ -209,7 +213,7 @@ class AscendingBaseSettings:
 
 @dataclass
 class HighTightFlagSettings:
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; unmeasured
     run_up_lookback_days: int = 30        # ~4-8 weeks for the prior explosive move
     min_run_up_pct: float = 100.0
     flag_lookback_days: int = 20          # ~3-5 weeks for the tight flag/consolidation
@@ -232,7 +236,7 @@ class MomentumBurstSettings:
 
     His words on the hold: "3 to 5 days moves of 8% to 40%." On entry timing:
     take day 1 of the burst, not day 2 or 3 (that's max_consecutive_up_days)."""
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; measured negative (-0.23R)
     # --- Bonde's core scan, verbatim ---
     min_gain_pct: float = 4.0             # c/c1 >= 1.04
     require_volume_above_prior: bool = True   # v > v1
@@ -285,7 +289,7 @@ class VCPSettings:
     momentum-breakout bots don't implement, so it selects a smaller, less
     crowded subset of names. See setups/vcp.py for the honesty note on what
     is/isn't verified about this pattern."""
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; too small a sample to trust (n=5)
     vcp_lookback_days: int = 90
     # How many bars on each side of a candidate swing point must be lower
     # (for a high) or higher (for a low) to confirm it as a genuine local
@@ -330,7 +334,7 @@ class SpringSettings:
     the stock. Classical/coherent (Wyckoff, Pruden), not modern
     peer-reviewed; described here mechanically (a structural
     false-breakdown-and-reclaim), never as "smart money" intent."""
-    enabled: bool = True
+    enabled: bool = False  # off by default -- see Squeeze/Pullback; encouraging but not conclusive (n=229)
     range_lookback_days: int = 40
     max_range_pct: float = 30.0
     volume_dryup_ratio_max: float = 0.85
@@ -349,6 +353,102 @@ class SpringSettings:
     # dedicated view rather than relying on run_scan()'s shared ranking.
     min_rs_rating: float = 0.0
     volume_avg_period: int = 50
+
+
+@dataclass
+class SqueezeSettings:
+    """Primary system A: fires on the QUIET/COILED day, BEFORE the
+    breakout -- a momentum leader, above a rising 50-day MA, in a range
+    that is meaningfully tighter than the stock's own ADR over the last
+    few days (self-normalized -- no hardcoded % threshold, since a
+    3%-ADR stock and a 10%-ADR stock need very different absolute
+    tightness to mean the same thing), that has NOT yet closed above its
+    recent pivot high, following a genuine prior advance (a coiled DEAD
+    stock is not a Squeeze candidate).
+
+    `close <= pivot_high` is required here where Breakout requires
+    `close > resistance` over a similar window -- the same stock can
+    never match both Squeeze and Breakout on the same day, by design.
+
+    Uses the EXISTING entry_mode="stop_buy" as-is: the signal day's own
+    high + entry_buffer_pct is the resting trigger. A stock that stays
+    coiled re-fires `match` every day it hasn't broken out -- this is
+    intended, not a bug: backtest/engine.py's entries loop already skips
+    a symbol with an open position (`if symbol in open_positions:
+    continue`), so a multi-day coil can't open duplicate/overlapping
+    trades. Note this approximates "leave the resting order up" as
+    "replace it with a fresh one pegged to yesterday's high each day" --
+    not literally identical (the trigger can drift down if the coil
+    prints a lower high day-to-day), worth knowing rather than assuming
+    away."""
+    enabled: bool = True
+    min_rs_rating: float = 80.0
+    ma_period: int = 50
+    require_above_ma: bool = True
+    require_rising_ma: bool = True
+    ma_slope_lookback_days: int = 20
+    min_ma_slope_pct: float = 0.0
+    # Self-normalized "quiet today" test, no hardcoded %: the trailing
+    # range_window_days' high-low range (INCLUDING today, unlike
+    # breakout.py's shift(1) base windows -- Squeeze fires ON the coiled
+    # day itself) expressed as a multiple of the stock's own single-day
+    # ADR.
+    range_window_days: int = 5
+    adr_lookback_days: int = 20
+    max_range_to_adr_ratio: float = 1.5
+    # The established base high, NOT counting today -- "hasn't already
+    # broken its recent pivot high yet."
+    pivot_lookback_days: int = 50
+    # Genuine prior advance -- same defaults as Breakout/VCP's own
+    # prior-move checks, for consistency.
+    prior_move_lookback_days: int = 63
+    min_prior_move_pct: float = 20.0
+    volume_avg_period: int = 50
+    min_adr_pct: float = 3.0
+
+
+@dataclass
+class PullbackSettings:
+    """Primary system B: buy the FIRST shallow pullback to a rising 10-
+    or 20-day EMA in an already-confirmed RS leader, on light volume
+    (sellers-exhausted proxy), after having been meaningfully extended
+    away from that same EMA recently (proof this is a genuine pullback
+    FROM an extended move, not chop that never left the average). Never
+    requires a new high to trigger, so it structurally can't feel "late"
+    the way a breakout does.
+
+    Uses the EXISTING entry_mode="next_open" (fills unconditionally at
+    tomorrow's open) rather than stop_buy -- this style buys near where
+    price already is, it doesn't need a breakout-confirmation trigger.
+    Stop = stop_mode="low_of_signal_day" as-is (today's low, ADR-capped);
+    no stop_reference_low override needed since the signal day's own low
+    already IS "the pocket's low" this style wants."""
+    enabled: bool = True
+    ema_period: int = 20
+    ema_slope_lookback_days: int = 10
+    min_ema_slope_pct: float = 0.0
+    # Stricter than most setups' RS floor: Pullback deliberately skips the
+    # breakout-timing confirmation Squeeze/Breakout lean on, so it leans
+    # harder on "already-confirmed leader."
+    min_rs_rating: float = 85.0
+    # "Meaningfully extended away from the EMA recently" -- prior
+    # extension, in ADRs off the EMA, at any point in the trailing window
+    # BEFORE today (self-normalized, same philosophy as Squeeze's
+    # range-to-ADR ratio).
+    extension_lookback_days: int = 20
+    min_extension_adr_multiple: float = 2.0
+    # "First shallow pullback": how close (in ADRs) counts as "at" the
+    # EMA, and how many days since the last such touch disqualifies today
+    # as the FIRST one.
+    max_pullback_distance_adr_multiple: float = 1.0
+    min_bars_since_last_touch: int = 10
+    # Light volume on the pullback itself -- sellers-exhausted proxy, not
+    # a fresh wave of selling.
+    volume_avg_period: int = 50
+    pullback_window_days: int = 3
+    max_pullback_volume_ratio: float = 0.9
+    adr_lookback_days: int = 20
+    min_adr_pct: float = 3.0
 
 
 @dataclass
@@ -484,6 +584,8 @@ class Settings:
     momentum_burst: MomentumBurstSettings = field(default_factory=MomentumBurstSettings)
     vcp: VCPSettings = field(default_factory=VCPSettings)
     spring: SpringSettings = field(default_factory=SpringSettings)
+    squeeze: SqueezeSettings = field(default_factory=SqueezeSettings)
+    pullback: PullbackSettings = field(default_factory=PullbackSettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
 
     def to_dict(self) -> dict:
@@ -508,6 +610,8 @@ class Settings:
             momentum_burst=MomentumBurstSettings(**d.get("momentum_burst", {})),
             vcp=VCPSettings(**d.get("vcp", {})),
             spring=SpringSettings(**d.get("spring", {})),
+            squeeze=SqueezeSettings(**d.get("squeeze", {})),
+            pullback=PullbackSettings(**d.get("pullback", {})),
             backtest=BacktestSettings(**d.get("backtest", {})),
         )
 

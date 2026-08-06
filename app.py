@@ -27,6 +27,7 @@ from scanner import (
     SECONDARY_BENCHMARK_SYMBOL,
     TIMEFRAME_LABELS,
     compute_regime_series,
+    enabled_setup_names,
     ensure_benchmark_loaded,
     find_approaching_pivot,
     history_lookback_days,
@@ -1044,7 +1045,43 @@ with tab_designer:
 
         s.enabled = st.checkbox("Enabled", value=s.enabled, key=f"{setup_choice}_enabled_{st.session_state.settings_version}")
 
-        if setup_choice == "breakout":
+        if setup_choice == "squeeze":
+            st.caption(
+                "Fires on the QUIET/COILED day, BEFORE the breakout prints -- a stop-buy resting above "
+                "today's tight range catches the move live instead of chasing an already-confirmed high."
+            )
+            s.min_rs_rating = st.slider("Min RS rating", 1, 99, int(s.min_rs_rating), key=f"d_sq_rs_{st.session_state.settings_version}")
+            s.ma_period = st.slider("MA period (days)", 10, 200, int(s.ma_period), key=f"d_sq_maperiod_{st.session_state.settings_version}")
+            s.require_above_ma = st.checkbox("Require close > MA", value=s.require_above_ma, key=f"d_sq_abovema_{st.session_state.settings_version}")
+            s.require_rising_ma = st.checkbox("Require MA sloping up", value=s.require_rising_ma, key=f"d_sq_risingma_{st.session_state.settings_version}")
+            s.ma_slope_lookback_days = st.slider("MA slope lookback (days)", 2, 60, int(s.ma_slope_lookback_days), key=f"d_sq_slopelb_{st.session_state.settings_version}")
+            s.min_ma_slope_pct = st.slider("Min MA slope % over lookback", -5.0, 20.0, float(s.min_ma_slope_pct), 0.5, key=f"d_sq_slopemin_{st.session_state.settings_version}")
+            s.range_window_days = st.slider("Quiet-range window (days)", 1, 20, int(s.range_window_days), key=f"d_sq_rangewin_{st.session_state.settings_version}")
+            s.max_range_to_adr_ratio = st.slider(
+                "Max range-to-ADR ratio", 0.3, 4.0, float(s.max_range_to_adr_ratio), 0.1, key=f"d_sq_ratio_{st.session_state.settings_version}",
+                help="Self-normalized 'quiet today' test: the window's own high-low range, as a multiple of the stock's own ADR. Lower = tighter/more selective.",
+            )
+            s.pivot_lookback_days = st.slider("Pivot lookback (days)", 10, 90, int(s.pivot_lookback_days), key=f"d_sq_pivotlb_{st.session_state.settings_version}", help="Hasn't already closed above this recent high -- the fix for 'the breakout already happened'.")
+            s.prior_move_lookback_days = st.slider("Prior move lookback (days)", 20, 126, int(s.prior_move_lookback_days), key=f"d_sq_priorlb_{st.session_state.settings_version}")
+            s.min_prior_move_pct = st.slider("Min prior move %", 0.0, 100.0, float(s.min_prior_move_pct), 5.0, key=f"d_sq_priormin_{st.session_state.settings_version}")
+            s.min_adr_pct = st.slider("Min ADR %", 0.5, 15.0, float(s.min_adr_pct), 0.5, key=f"d_sq_adr_{st.session_state.settings_version}")
+        elif setup_choice == "pullback":
+            st.caption(
+                "Buy the FIRST shallow pullback to a rising EMA in an already-confirmed leader, on light "
+                "volume -- buying weakness within strength instead of chasing a new high."
+            )
+            s.ema_period = st.slider("EMA period (days)", 5, 50, int(s.ema_period), key=f"d_pb_emaperiod_{st.session_state.settings_version}")
+            s.ema_slope_lookback_days = st.slider("EMA slope lookback (days)", 2, 30, int(s.ema_slope_lookback_days), key=f"d_pb_slopelb_{st.session_state.settings_version}")
+            s.min_ema_slope_pct = st.slider("Min EMA slope % over lookback", -5.0, 20.0, float(s.min_ema_slope_pct), 0.5, key=f"d_pb_slopemin_{st.session_state.settings_version}")
+            s.min_rs_rating = st.slider("Min RS rating", 1, 99, int(s.min_rs_rating), key=f"d_pb_rs_{st.session_state.settings_version}", help="Stricter than most setups here -- Pullback has no breakout-timing confirmation to lean on, so it leans harder on 'already a confirmed leader'.")
+            s.extension_lookback_days = st.slider("Extension lookback (days)", 5, 60, int(s.extension_lookback_days), key=f"d_pb_extlb_{st.session_state.settings_version}")
+            s.min_extension_adr_multiple = st.slider("Min prior extension (x ADR off the EMA)", 0.5, 6.0, float(s.min_extension_adr_multiple), 0.25, key=f"d_pb_ext_{st.session_state.settings_version}", help="Proof this is a genuine pullback FROM an extended move, not chop that never left the average.")
+            s.max_pullback_distance_adr_multiple = st.slider("Max distance from EMA to count as 'at the pocket' (x ADR)", 0.25, 3.0, float(s.max_pullback_distance_adr_multiple), 0.25, key=f"d_pb_dist_{st.session_state.settings_version}")
+            s.min_bars_since_last_touch = st.slider("Min days since the last touch (the 'FIRST' pullback)", 1, 30, int(s.min_bars_since_last_touch), key=f"d_pb_touch_{st.session_state.settings_version}")
+            s.pullback_window_days = st.slider("Volume averaging window (days)", 1, 10, int(s.pullback_window_days), key=f"d_pb_volwin_{st.session_state.settings_version}")
+            s.max_pullback_volume_ratio = st.slider("Max pullback volume ratio (vs the 50-day average)", 0.3, 2.0, float(s.max_pullback_volume_ratio), 0.05, key=f"d_pb_volratio_{st.session_state.settings_version}", help="Light volume -- sellers exhausted, not a fresh wave of selling.")
+            s.min_adr_pct = st.slider("Min ADR %", 0.5, 15.0, float(s.min_adr_pct), 0.5, key=f"d_pb_adr_{st.session_state.settings_version}")
+        elif setup_choice == "breakout":
             s.min_adr_pct = st.slider("Min ADR %", 0.5, 15.0, float(s.min_adr_pct), 0.5, key=f"d_bo_adr_{st.session_state.settings_version}")
             s.prior_move_min_pct = st.slider("Prior move min %", 0.0, 200.0, float(s.prior_move_min_pct), 5.0, key=f"d_bo_pmmin_{st.session_state.settings_version}")
             s.prior_move_max_pct = st.slider("Prior move max %", 10.0, 500.0, float(s.prior_move_max_pct), 5.0, key=f"d_bo_pmmax_{st.session_state.settings_version}")
@@ -1436,6 +1473,16 @@ with tab_designer:
 # --------------------------------------------------------------------------
 with tab_scanner:
     st.subheader("Today's matches")
+    _enabled_now = enabled_setup_names(settings)
+    _primary_on = [SETUP_REGISTRY[k]["label"] for k in _enabled_now if SETUP_REGISTRY[k].get("tier") == "primary"]
+    _secondary_on = [SETUP_REGISTRY[k]["label"] for k in _enabled_now if SETUP_REGISTRY[k].get("tier") == "secondary"]
+    st.caption(
+        f"Scanning: **{', '.join(_primary_on) or 'none'}**"
+        + (f" · plus {len(_secondary_on)} other setup(s) enabled in Designer" if _secondary_on else "")
+        + " -- 11 other setups (one, Breakout, has a real measured edge but chases an already-confirmed "
+        "move; the rest are experimental or measured negative) are available but off by default. "
+        "Enable them in the Designer tab."
+    )
     if not history:
         st.info("Load data from the sidebar first.")
     else:
@@ -1817,7 +1864,8 @@ with tab_scanner:
 
         with st.expander("📖 Pattern library (all setups, whether matched or not)"):
             st.caption("Diagrams are idealized schematics illustrating the shape -- not real ticker data.")
-            for setup_key, spec in SETUP_REGISTRY.items():
+
+            def _render_pattern_entry(setup_key, spec):
                 st.markdown(f"**{spec['label']}**")
                 diagram_col, text_col = st.columns([1, 1])
                 with diagram_col:
@@ -1827,6 +1875,16 @@ with tab_scanner:
                 with text_col:
                     st.write(PATTERN_EXPLANATIONS.get(setup_key, "No explanation available."))
                 st.divider()
+
+            st.markdown("### Primary")
+            for setup_key, spec in SETUP_REGISTRY.items():
+                if spec.get("tier") == "primary":
+                    _render_pattern_entry(setup_key, spec)
+
+            st.markdown("### Other setups (experimental / measured mixed)")
+            for setup_key, spec in SETUP_REGISTRY.items():
+                if spec.get("tier") != "primary":
+                    _render_pattern_entry(setup_key, spec)
 
         with st.expander("🖼️ Browse all charts (eyeball any loaded stock yourself)", expanded=False):
             st.caption(
@@ -3411,18 +3469,14 @@ with tab_orders:
             )
 
         setup_labels = sorted(scan_all["setup"].unique().tolist())
-        # Momentum Burst and Breakout by default: the two setups whose hold
-        # period and entry mechanics actually match placing a stop-buy and
-        # holding 3-5 days. The O'Neil patterns are built for multi-week
-        # holds -- available here, just not the default.
-        preferred = [
-            l for l in setup_labels
-            if l.startswith("Momentum Burst") or l == "Breakout"
-        ] or setup_labels
+        # Squeeze and Pullback by default -- the two primary systems this app
+        # currently recommends (see the Scanner tab caption). The other
+        # setups are available here too, just not the default.
+        preferred = [l for l in setup_labels if l in ("Squeeze", "Pullback")] or setup_labels
         chosen_setups = st.multiselect(
             "Setups to draw from", setup_labels, default=preferred, key="orders_setups",
-            help="Defaults to Momentum Burst and Breakout -- the two with a 3-5 day horizon. The O'Neil "
-            "patterns are designed for multi-week holds, so they'll behave differently on this timetable.",
+            help="Defaults to Squeeze and Pullback, the two primary systems. Enable other setups in the "
+            "Designer tab to draw orders from them too.",
         )
 
         picks = scan_all[scan_all["setup"].isin(chosen_setups)]
@@ -3578,6 +3632,10 @@ with tab_orders:
             pd.DataFrame([
                 {"setup": "Breakout", "trades": 135, "win %": 54.8, "expectancy (R)": 0.473,
                  "profit factor": 2.15, "max DD %": -14.0},
+                {"setup": "Squeeze", "trades": 629, "win %": 43.9, "expectancy (R)": 0.204,
+                 "profit factor": 1.04, "max DD %": -39.1},
+                {"setup": "Pullback*", "trades": 31, "win %": 29.0, "expectancy (R)": -0.161,
+                 "profit factor": 0.86, "max DD %": -5.2},
                 {"setup": "Cup with Handle", "trades": 65, "win %": 50.8, "expectancy (R)": 0.390,
                  "profit factor": 1.76, "max DD %": -15.1},
                 {"setup": "Ascending Base", "trades": 133, "win %": 51.1, "expectancy (R)": 0.087,
@@ -3593,7 +3651,27 @@ with tab_orders:
             ]),
             use_container_width=True, hide_index=True,
         )
+        st.caption("*Pullback uses next-open fill, not stop-buy, so it isn't directly comparable to the other rows' execution model.")
         st.markdown(
+            "**The honest headline: on this measurement, none of these systems beat simply buying and "
+            "holding the index.** SPY returned +25.0% CAGR and QQQ +30.2% CAGR over the same measured "
+            "window (2,418-symbol universe, 2022-2026) -- Breakout's own full-universe CAGR was **-9.4%**, "
+            "and Squeeze's was **-30.7%**. This is the sobering answer to 'does this beat most other "
+            "investors' -- as configured, right now, it does not. Per-trade expectancy being positive "
+            "(what the table above shows) is not the same as the portfolio actually compounding faster "
+            "than a passive index -- position sizing, concurrency, and correlation across many "
+            "simultaneously-open small-cap positions matter enormously and aren't solved just by having "
+            "a positive-R setup. **Squeeze in particular has a real problem**, not a cosmetic one: it "
+            "fires far more often than Breakout (931 vs. 449 signals over the same full-universe data) "
+            "because 'quiet and coiled' is structurally more common than 'confirmed breakout', so it "
+            "keeps many more correlated positions open at once than the shared 10-slot/20%-per-position "
+            "default sizing was built for. Its entry timing genuinely fixes the 'the breakout already "
+            "happened' complaint (see setups/explanations.py); its position sizing does not yet fix "
+            "itself. Worth retesting with fewer concurrent slots, smaller per-trade risk, or the "
+            "regime/crowding filter turned on (Backtest mechanics, Designer tab) before trusting it with "
+            "real capital. **Pullback** is more conservative (real drawdown control, positive Sharpe on "
+            "the full universe) but the sample here is too small and too inconsistent across universes "
+            "to call validated either.\n\n"
             "**Breakout wins, and it isn't close.** Expectancy 0.47R at a profit factor of 2.15 over 135 "
             "trades. The reason is visible in the exits: its trailing-stop exits average **+3.6R** while "
             "its stopped-out trades average -0.29R. The winners run far enough to pay for the losers "
