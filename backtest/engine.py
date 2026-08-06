@@ -334,7 +334,19 @@ def run_backtest(
     if not prepared:
         return BacktestResult(trades=[], equity_curve=pd.Series(dtype=float), side=side)
 
-    all_dates = sorted(set().union(*[set(df.index) for df in prepared.values()]))
+    # A single stray weekend row in one symbol's cached data (a real FMP
+    # data-quality artifact found via live verification -- e.g. one ticker
+    # carrying a Saturday bar) is enough to corrupt every OTHER open
+    # position's equity mark-to-market on that date: `date in
+    # prepared[s].index` correctly fails for every symbol that doesn't share
+    # the bogus date, silently dropping their market value from `equity`
+    # for that one day (cash committed to them stays subtracted, but their
+    # current value isn't added back) -- capital isn't lost, but the
+    # reported equity curve/max-drawdown can look catastrophic for a single
+    # phantom day. Markets are never open on a weekend regardless of what
+    # any one symbol's data claims, so this filter can never wrongly drop a
+    # real trading day.
+    all_dates = sorted(d for d in set().union(*[set(df.index) for df in prepared.values()]) if d.weekday() < 5)
 
     # stop_buy models a premarket order placed for the session immediately
     # after the signal, so the delay is structurally fixed at 1 bar: 0 would
