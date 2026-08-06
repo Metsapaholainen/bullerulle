@@ -1520,17 +1520,29 @@ with tab_scanner:
             + " Re-enable them below, or re-apply your preset with the ↻ button next to 'Load preset' in "
             "the sidebar (it re-applies even when the dropdown already shows the preset you want)."
         )
-        if st.button("Re-enable Squeeze & Pullback"):
-            if not hasattr(settings, "squeeze") or not hasattr(settings, "pullback"):
-                # Guards against a stale st.session_state.settings object
-                # from before Squeeze/Pullback existed (e.g. a browser tab
-                # left open across a redeploy) -- patching fields that were
-                # never there to begin with is meaningless, so replace the
-                # whole object with a fresh default instead of crashing.
-                st.session_state.settings = presets.load_default()
-                settings = st.session_state.settings
-            settings.squeeze.enabled = True
-            settings.pullback.enabled = True
+        if st.button(
+            "Re-enable Squeeze & Pullback",
+            help="Resets to a fresh default Settings with Squeeze and Pullback enabled -- any other "
+            "custom tweaks (universe filters, other setups you'd enabled, etc.) are reset too. This is "
+            "an emergency un-stick button, not a targeted fix.",
+        ):
+            # Always build a brand-new Settings rather than mutating
+            # st.session_state.settings.squeeze in place -- a prior version
+            # of this button did that and it crashed in production with
+            # `AttributeError: 'Settings' object has no attribute 'squeeze'`.
+            # Confirmed via the full (unredacted) Streamlit Cloud log: this
+            # wasn't a bad object in one session, it was the deployed
+            # settings.py module itself missing the Squeeze/Pullback fields
+            # -- a stale-module-cache artifact of Streamlit Cloud's
+            # incremental hot-reload serving app.py fresh while settings.py
+            # lagged behind. A "Reboot app" (full process restart, forcing
+            # every module to reimport) is the actual fix for that specific
+            # incident; this rewrite just avoids a second, needless mutation
+            # of a live object once the environment is no longer stale.
+            fresh = presets.load_default()
+            fresh.squeeze.enabled = True
+            fresh.pullback.enabled = True
+            st.session_state.settings = fresh
             # Bump so the Designer tab's per-setup "Enabled" checkbox (keyed
             # on settings_version) gets a fresh key on this rerun -- without
             # it, that checkbox's own stale, already-registered False would
