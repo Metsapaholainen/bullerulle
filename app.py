@@ -502,10 +502,24 @@ with st.sidebar:
             st.session_state.settings_version += 1
             st.session_state.preset_just_applied = chosen_now
 
-    st.selectbox(
-        "Load preset", preset_options, key="preset_selectbox", on_change=_apply_chosen_preset,
-        help="⭐ presets are built-in, sourced directly from Qullamaggie's documented small/mid-cap vs large-cap thresholds. Applies as soon as you pick it.",
-    )
+    preset_select_col, preset_reapply_col = st.columns([5, 1])
+    with preset_select_col:
+        st.selectbox(
+            "Load preset", preset_options, key="preset_selectbox", on_change=_apply_chosen_preset,
+            help="⭐ presets are built-in, sourced directly from Qullamaggie's documented small/mid-cap vs large-cap thresholds. Applies as soon as you pick it.",
+        )
+    with preset_reapply_col:
+        st.write("")
+        # Picking a preset only re-applies it on a genuine value change
+        # (Streamlit's on_change never fires if you select the option
+        # that's already showing) -- so if settings drifted after that,
+        # e.g. Squeeze or Pullback got toggled off in the Designer tab,
+        # re-picking the same preset from the dropdown silently does
+        # nothing. This button re-applies the current selection
+        # unconditionally, for exactly that stuck case.
+        if st.button("↻", help="Re-apply the selected preset. Use this if a scan is returning nothing even though the right preset is already selected -- settings can drift after a preset is applied (e.g. a setup toggled off in the Designer tab), and re-picking the same dropdown option doesn't re-apply it on its own."):
+            _apply_chosen_preset()
+            st.rerun()
     if st.session_state.pop("preset_just_applied", None):
         st.success(f"Applied preset '{st.session_state.get('preset_selectbox')}'.")
 
@@ -1491,13 +1505,39 @@ with tab_scanner:
     _enabled_now = enabled_setup_names(settings)
     _primary_on = [SETUP_REGISTRY[k]["label"] for k in _enabled_now if SETUP_REGISTRY[k].get("tier") == "primary"]
     _secondary_on = [SETUP_REGISTRY[k]["label"] for k in _enabled_now if SETUP_REGISTRY[k].get("tier") == "secondary"]
-    st.caption(
-        f"Scanning: **{', '.join(_primary_on) or 'none'}**"
-        + (f" · plus {len(_secondary_on)} other setup(s) enabled in Designer" if _secondary_on else "")
-        + " -- 11 other setups (one, Breakout, has a real measured edge but chases an already-confirmed "
-        "move; the rest are experimental or measured negative) are available but off by default. "
-        "Enable them in the Designer tab."
-    )
+    if not _primary_on:
+        # Distinct from the normal "11 other setups are off by default"
+        # caption below -- that one is expected and fine. This is the
+        # broken state: Squeeze and/or Pullback themselves got switched
+        # off (usually an "Enabled" checkbox toggled in the Designer tab),
+        # which silently zeroes out the scan no matter what preset the
+        # sidebar dropdown shows, since re-picking an already-selected
+        # preset doesn't re-apply it (Streamlit's on_change only fires on
+        # an actual value change).
+        st.warning(
+            "Squeeze and Pullback -- the two primary systems -- are both switched off, so a scan will "
+            + (f"only draw from {', '.join(_secondary_on)}." if _secondary_on else "return nothing at all.")
+            + " Re-enable them below, or re-apply your preset with the ↻ button next to 'Load preset' in "
+            "the sidebar (it re-applies even when the dropdown already shows the preset you want)."
+        )
+        if st.button("Re-enable Squeeze & Pullback"):
+            settings.squeeze.enabled = True
+            settings.pullback.enabled = True
+            # Bump so the Designer tab's per-setup "Enabled" checkbox (keyed
+            # on settings_version) gets a fresh key on this rerun -- without
+            # it, that checkbox's own stale, already-registered False would
+            # win over the value= just set above and silently flip it right
+            # back off the moment the Designer tab's code runs.
+            st.session_state.settings_version += 1
+            st.rerun()
+    else:
+        st.caption(
+            f"Scanning: **{', '.join(_primary_on)}**"
+            + (f" · plus {len(_secondary_on)} other setup(s) enabled in Designer" if _secondary_on else "")
+            + " -- 11 other setups (one, Breakout, has a real measured edge but chases an already-confirmed "
+            "move; the rest are experimental or measured negative) are available but off by default. "
+            "Enable them in the Designer tab."
+        )
     if not history:
         st.info("Load data from the sidebar first.")
     else:
