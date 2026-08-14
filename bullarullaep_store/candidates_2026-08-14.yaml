@@ -1,0 +1,19 @@
+as_of: '2026-08-14'
+candidates:
+- match: true
+  gap_pct: 11.043771043771036
+  volume_ratio: 3.0705150455237233
+  prior_range_pct: 18.963068181818183
+  quiet_base_run_pct: -9.945421467556093
+  had_prior_ep: true
+  growth_pct: 500.0
+  growth_tier: 5-star
+  eps_beat_pct: .nan
+  is_earnings_day: true
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 3.0874460749504133
+  symbol: CHCI
+  as_of: '2026-08-14'
