@@ -1,0 +1,19 @@
+as_of: '2026-08-17'
+candidates:
+- match: true
+  gap_pct: 15.70247933884297
+  volume_ratio: 9.056138336129177
+  prior_range_pct: 14.285714285714283
+  quiet_base_run_pct: 35.95505617977528
+  had_prior_ep: false
+  growth_pct: 66.67
+  growth_tier: floor-met
+  eps_beat_pct: .nan
+  is_earnings_day: false
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 11.626386270013473
+  symbol: TPCS
+  as_of: '2026-08-17'
