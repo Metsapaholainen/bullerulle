@@ -1,0 +1,19 @@
+as_of: '2026-08-20'
+candidates:
+- match: true
+  gap_pct: 11.237688382579803
+  volume_ratio: 4.208791099063059
+  prior_range_pct: 12.979913551995942
+  quiet_base_run_pct: 15.264669675830934
+  had_prior_ep: true
+  growth_pct: 333.33
+  growth_tier: 5-star
+  eps_beat_pct: 22.14
+  is_earnings_day: true
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 4.16627996866052
+  symbol: EL
+  as_of: '2026-08-20'
