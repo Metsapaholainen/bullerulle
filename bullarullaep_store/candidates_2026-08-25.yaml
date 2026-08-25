@@ -1,0 +1,19 @@
+as_of: '2026-08-25'
+candidates:
+- match: true
+  gap_pct: 21.18666316618533
+  volume_ratio: 5.756562118786849
+  prior_range_pct: 16.64798206278026
+  quiet_base_run_pct: 0.5013192612137285
+  had_prior_ep: true
+  growth_pct: 51.52
+  growth_tier: floor-met
+  eps_beat_pct: 29.3
+  is_earnings_day: true
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 4.687614217702691
+  symbol: NSSC
+  as_of: '2026-08-25'
