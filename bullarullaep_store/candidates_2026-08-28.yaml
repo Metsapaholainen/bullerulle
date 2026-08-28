@@ -1,0 +1,19 @@
+as_of: '2026-08-28'
+candidates:
+- match: true
+  gap_pct: 15.35321263755767
+  volume_ratio: 3.4281434408700138
+  prior_range_pct: 18.658357771260984
+  quiet_base_run_pct: -27.797001153402533
+  had_prior_ep: false
+  growth_pct: .nan
+  growth_tier: unknown
+  eps_beat_pct: 13.7
+  is_earnings_day: false
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 4.963464704625781
+  symbol: SOLS
+  as_of: '2026-08-28'
