@@ -1,0 +1,19 @@
+as_of: '2026-09-04'
+candidates:
+- match: true
+  gap_pct: 12.95681063122924
+  volume_ratio: 7.600215059512671
+  prior_range_pct: 11.785095320623928
+  quiet_base_run_pct: -20.997375328084
+  had_prior_ep: false
+  growth_pct: 100.44
+  growth_tier: 5-star
+  eps_beat_pct: -68.28
+  is_earnings_day: false
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 10.895896122635595
+  symbol: HCM
+  as_of: '2026-09-04'
