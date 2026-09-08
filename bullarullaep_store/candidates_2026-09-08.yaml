@@ -1,0 +1,19 @@
+as_of: '2026-09-08'
+candidates:
+- match: true
+  gap_pct: 19.889502762430926
+  volume_ratio: 4.294692889133426
+  prior_range_pct: 13.470319634703193
+  quiet_base_run_pct: 17.227979274611414
+  had_prior_ep: true
+  growth_pct: 28.57
+  growth_tier: floor-met
+  eps_beat_pct: 12.5
+  is_earnings_day: false
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 3.641821582688259
+  symbol: BBCP
+  as_of: '2026-09-08'
