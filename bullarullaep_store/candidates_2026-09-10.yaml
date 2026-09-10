@@ -1,0 +1,19 @@
+as_of: '2026-09-10'
+candidates:
+- match: true
+  gap_pct: 11.216730038022812
+  volume_ratio: 3.329450055224363
+  prior_range_pct: 18.731417244796837
+  quiet_base_run_pct: 29.07975460122698
+  had_prior_ep: true
+  growth_pct: 700.0
+  growth_tier: 5-star
+  eps_beat_pct: -19.65
+  is_earnings_day: false
+  catalyst_type: unclear_or_noise
+  catalyst_confidence: 0.0
+  catalyst_rationale: no ANTHROPIC_API_KEY configured
+  social_sentiment_spike: .nan
+  score: 3.225561529513322
+  symbol: INNV
+  as_of: '2026-09-10'
